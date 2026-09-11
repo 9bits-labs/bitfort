@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+
+# Zero-Dot-Env: plaintext secret files must never be committed (docs/SPEC.md §1)
+.env
+.env.*
+!.env.example
+**/*.seed
+
+# Working notes for the 2026-09-05 code base review: findings plus the batch plan they
+# feed. Deleted once the plan is worked through.
+/REVIEW-FINDINGS.tmp.md

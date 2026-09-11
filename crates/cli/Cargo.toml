@@ -1,0 +1,37 @@
+[package]
+name = "bitfort-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "bitfort"
+path = "src/main.rs"
+
+[dependencies]
+bitfort-core = { path = "../core" }
+anyhow = "1.0.103"
+clap = { version = "4.6.1", features = ["derive"] }
+# Shell-completion and man-page generation for the `completions`/`man` subcommands. Both are
+# clap-ecosystem helpers with no webview, so invariant 5 (no GUI dep in the CLI) still holds.
+clap_complete = "4.6.7"
+clap_mangen = "0.3.0"
+serde_json = "1.0.150"
+rpassword = "7.5.4"
+zeroize = "1.9.0"
+# Terminal presentation. `anstream` auto-strips color when the stream is not a TTY
+# (pipes, CI, an MCP host driving `bitfort` over stdio), so machine consumers never
+# see escape codes; `anstyle` is the styling vocabulary. Neither pulls in a webview
+# (invariant 5).
+anstream = "1.0.0"
+anstyle = "1.0.14"
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.4.4"
+libc = "0.2.186"
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+tempfile = "3.27.0"

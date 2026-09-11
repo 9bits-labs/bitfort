@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/cli"]
+
+# crates/desktop (Tauri, docs/SPEC.md §9) is intentionally not a member, to keep the CLI
+# build free of GUI deps.
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.96"
+publish = false
+
+# Dev builds keep file:line for panic backtraces but drop the variable/type
+# DWARF only a step debugger needs - faster codegen and linking, smaller
+# artifacts. Override with `debug = "full"` to run a step debugger.
+[profile.dev]
+debug = "line-tables-only"

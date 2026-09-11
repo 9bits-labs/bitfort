@@ -1,0 +1,196 @@
+---
+title: CLI reference
+description: Every bitfort command, argument and flag.
+---
+
+Every command works on the `.bitfort/` directory found by walking up from the current
+directory.
+
+## Global flags
+
+These apply to every command.
+
+| Flag | Meaning |
+|---|---|
+| `--env <ENV>` | Environment to act on. Defaults to `default_env` in `config.toml`. |
+| `--dir <DIR>` | Directory to start the search for `.bitfort/` from. |
+| `--json` | Machine-readable output. Honored by `status`, `list`, `verify`, `member list` and `env list`. Write commands ignore it. Errors become `{"error": .., "try": ..}` on standard error. |
+| `-y`, `--yes` | Skip the confirmation on `unset`, `member rm`, and a `set` that overwrites. Required when there is no terminal to answer the prompt. |
+| `-q`, `--quiet` | Drop titles, hints and spacer lines. Keeps facts, data and errors. |
+| `-V`, `--version` | Print the version. |
+
+## Getting started
+
+### `bitfort init`
+
+Create `.bitfort/`, generate the initializer identity, pin the trust anchor, and write roster
+version 1 with an empty `development` vault. Ensures `.env*` is in `.gitignore`.
+
+`--name <NAME>` records a display name for the initializer.
+
+On a terminal this is a guided setup that offers to import a `.env` it finds and to commit. Off
+a terminal it takes defaults and asks nothing.
+
+### `bitfort keygen`
+
+Generate a local identity if you do not have one, and print the `bfinvite1:` invite blob.
+Running it again does not replace an existing identity.
+
+`--name <NAME>` suggests a display name inside the invite.
+
+### `bitfort identity new`
+
+Mint a fresh identity and print both secrets, to provision a machine that has no keyring: a CI
+runner or a container. This is the only command that prints private key material.
+
+`--name <NAME>` sets the display name in the invite blob. `--force` prints to a terminal
+anyway; without it the command refuses one, so the key does not land in your scrollback.
+
+```bash
+bitfort identity new --name ci > ci.key
+```
+
+The block it writes is also a valid `BITFORT_IDENTITY_FILE`, so it needs no editing. It holds
+`BITFORT_IDENTITY`, `BITFORT_SIGN_IDENTITY`, and the `bfinvite1:` blob as a comment for a
+maintainer to add.
+
+The minted identity is not stored in your keyring and is a member of nothing until a maintainer
+runs `member add` with that invite. See [CI and headless use](/docs/ci).
+
+### `bitfort status`
+
+One screen covering the roster, the vault, the Git state, and the next step to take.
+
+## Secrets
+
+### `bitfort set <KEY[=VALUE]>`
+
+Add or update a secret, then re-encrypt.
+
+With no `=VALUE`, the value is read from the terminal without echo, which keeps it out of shell
+history. When standard input is not a terminal the value is read from there instead, with one
+trailing newline removed:
+
+```bash
+printf %s "$SECRET" | bitfort set STRIPE_KEY
+```
+
+Overwriting an existing name asks for confirmation. Pass `-y` to skip it.
+
+### `bitfort get <KEY>`
+
+Decrypt and print one value. This puts plain text on your screen and warns you so.
+
+### `bitfort unset <KEY>`
+
+Remove a secret and re-encrypt. Asks for confirmation.
+
+### `bitfort list`
+
+List the names in the vault. Never prints a value.
+
+### `bitfort import <PATH>`
+
+Read a dotenv-format file into the vault. `--delete-source` removes the file after a successful
+import. See [Migrate from .env](/docs/migrate) for how quoting is handled.
+
+### `bitfort export`
+
+Decrypt and print every secret. Refuses to write to a terminal without `--force`.
+
+`--format <FORMAT>` accepts:
+
+| Value | Output |
+|---|---|
+| `dotenv` | `KEY=VALUE`, the exact inverse of `import`. This is the default. |
+| `shell` | `export KEY=VALUE` for `eval` or `source`. |
+| `json` | One `{ "KEY": "VALUE" }` object. |
+
+`dotenv` and `json` escape every control character. `shell` cannot, because its output is
+evaluated and has to reproduce the value byte for byte in POSIX `sh`, which has no escape
+inside single quotes. Use `dotenv` or `json` when a person will read the output.
+
+## Running
+
+### `bitfort run -- <COMMAND>`
+
+Decrypt in memory, add the values to the child's environment, and run the command. Passes on
+the child's exit code, and maps a signal death to `128 + signal`.
+
+`--clean` starts from a minimal environment rather than inheriting the parent's.
+
+The parent's plain-text buffers are wiped after the child starts. `BITFORT_IDENTITY`,
+`BITFORT_SIGN_IDENTITY` and `BITFORT_IDENTITY_FILE` are removed from the child.
+
+On Unix the child gets its own process group and the terminal is handed to it for the duration,
+so one Ctrl-C reaches it once.
+
+## Trust
+
+### `bitfort verify`
+
+Check the roster: the signature chain, the anchor pin, the environment match, and
+anti-rollback. Prints the trust anchor for out-of-band comparison.
+
+`--strict` exits non-zero on any failure, including a protection that could only be applied on
+a best-effort basis, such as anti-rollback in a shallow clone. Use it in CI.
+
+### `bitfort anchor`
+
+Print the trust anchor as hex and as a six-word phrase, to publish outside the repository.
+
+`--share` emits a plain block to paste into a README or a message.
+
+### `bitfort member add <INVITE>`
+
+Add the identity from a `bfinvite1:` blob, count the roster version up, re-sign, and
+re-encrypt. Maintainers only.
+
+`--maintainer` adds them with the right to sign roster changes. `--name <NAME>` overrides the
+name suggested in the invite.
+
+### `bitfort member rm <NAME>`
+
+Remove a member by display name, then re-sign and re-encrypt. Asks for confirmation. Refuses to
+remove the last maintainer, and refuses to remove you.
+
+### `bitfort member list`
+
+The roster of the target environment, with its verification status.
+
+### `bitfort rotate`
+
+Re-encrypt the vault to the current roster with fresh ciphertext, and record `rotated_at`.
+Advises changing the underlying credentials, which it cannot do for you.
+
+## Environments
+
+### `bitfort env add <NAME>`
+
+Create an environment with its own roster and vault, rooted at the same trust anchor. Anchor
+holders only.
+
+### `bitfort env list`
+
+Every environment with its roster and verification status.
+
+## Merges
+
+### `bitfort resolve`
+
+Merge a Git-conflicted vault into one clean re-encrypted vault. All three sides are read from
+the Git index rather than from the conflict markers in the file.
+
+A name changed on both sides needs a choice: `--ours` keeps your value, `--theirs` keeps
+theirs. `resolve` names every secret the merge adds or removes, and warns when there is no
+common ancestor to merge against.
+
+## Shell integration
+
+### `bitfort completions <SHELL>`
+
+Print a completion script. Accepts `bash`, `elvish`, `fish`, `powershell` and `zsh`.
+
+### `bitfort man`
+
+Print the manual page in roff on standard output.

@@ -215,32 +215,43 @@ pub fn keygen(ui: &Ui, name: Option<String>) -> Result<()> {
 pub fn identity_new(ui: &Ui, name: Option<String>, force: bool) -> Result<()> {
     // Before anything is generated: the guard is about where the output goes, not what it is.
     if ui.stdout_is_terminal() && !force {
+        // `--name` keeps the invite from colliding with the caller's own roster name, which
+        // `member add` refuses after the key is already on disk. The file belongs outside the
+        // work tree, because `.gitignore` covers only `.env*`, and `umask 077` gives a new
+        // file the 600 mode an identity file requires.
+        let redirect = if ui.json() {
+            "(umask 077; bitfort identity new --name ci --json > ~/ci.json)"
+        } else {
+            "(umask 077; bitfort identity new --name ci > ~/ci.key)"
+        };
         return Err(Failure::hinted(
             "refusing to print a private identity to a terminal\nthis would leave the key in \
              scrollback; redirect it to a file or a consumer instead",
-            "bitfort identity new > ci.key   (or pass --force)",
+            format!("{redirect}   (or pass --force)"),
         ));
     }
 
     let name = resolve_name(name);
     // Deliberately not `keystore::store_identity`: this identity belongs to another machine.
     let identity = Identity::generate()?;
+    let (enc, sign) = (identity.enc_secret(), identity.sign_secret());
+    let invite = Invite::from_identity(&identity, name).encode()?;
 
-    // Printed as `KEY=VALUE` so the pair can be sourced, or split into two CI secrets.
-    ui.line(&format!(
-        "BITFORT_IDENTITY={}",
-        identity.enc_secret().as_str()
-    ));
-    ui.line(&format!(
-        "BITFORT_SIGN_IDENTITY={}",
-        identity.sign_secret().as_str()
-    ));
-    ui.line("");
-    ui.line("# Send this invite to a maintainer, who runs: bitfort member add <invite>");
-    ui.line(&format!(
-        "# {}",
-        Invite::from_identity(&identity, name).encode()?
-    ));
+    if ui.json() {
+        // Keyed by the variable names, so a caller stores each value under its own name.
+        ui.emit_json(&json!({
+            (keystore::ENV_ENC): enc.as_str(),
+            (keystore::ENV_SIGN): sign.as_str(),
+            "invite": invite,
+        }));
+    } else {
+        // Printed as `KEY=VALUE` so the pair can be sourced, or split into two CI secrets.
+        ui.line(&format!("{}={}", keystore::ENV_ENC, enc.as_str()));
+        ui.line(&format!("{}={}", keystore::ENV_SIGN, sign.as_str()));
+        ui.line("");
+        ui.line("# Send this invite to a maintainer, who runs: bitfort member add <invite>");
+        ui.line(&format!("# {invite}"));
+    }
 
     // To stderr, so the operator still sees it when stdout is redirected into a key file,
     // and so it never lands inside that file.

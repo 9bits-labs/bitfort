@@ -91,8 +91,11 @@ struct Cli {
 
     /// Emit machine-readable JSON instead of human text.
     ///
-    /// Honored by the read/report commands (status, list, verify, member/env list); write
-    /// commands ignore it. Errors become `{"error": .., "try": ..}` on stderr.
+    /// Honored by status, list, verify, anchor, member list, env list and identity new. Other
+    /// commands keep their text output. Under --json no command asks a question: a
+    /// confirmation needs --yes, and init takes its defaults. The terminal guards on export
+    /// and identity new still refuse a terminal. Errors become `{"error": .., "try": ..}` on stderr, except
+    /// argument errors.
     #[arg(long, global = true)]
     json: bool,
 

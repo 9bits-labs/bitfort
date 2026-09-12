@@ -14,7 +14,7 @@ These apply to every command.
 |---|---|
 | `--env <ENV>` | Environment to act on. Defaults to `default_env` in `config.toml`. |
 | `--dir <DIR>` | Directory to start the search for `.bitfort/` from. |
-| `--json` | Machine-readable output. Honored by `status`, `list`, `verify`, `member list` and `env list`. Write commands ignore it. Errors become `{"error": .., "try": ..}` on standard error. |
+| `--json` | Machine-readable output. Honored by `status`, `list`, `verify`, `anchor`, `member list`, `env list` and `identity new`. Other commands keep their text output. Under `--json` no command asks a question: a confirmation needs `--yes`, and `init` takes its defaults. The terminal guards on `export` and `identity new` still refuse a terminal. Errors, except argument errors, become `{"error": .., "try": ..}` on standard error. |
 | `-y`, `--yes` | Skip the confirmation on `unset`, `member rm`, and a `set` that overwrites. Required when there is no terminal to answer the prompt. |
 | `-q`, `--quiet` | Drop titles, hints and spacer lines. Keeps facts, data and errors. |
 | `-V`, `--version` | Print the version. |
@@ -47,12 +47,26 @@ runner or a container. This is the only command that prints private key material
 anyway; without it the command refuses one, so the key does not land in your scrollback.
 
 ```bash
-bitfort identity new --name ci > ci.key
+(umask 077; bitfort identity new --name ci > ~/ci.key)
 ```
 
-The block it writes is also a valid `BITFORT_IDENTITY_FILE`, so it needs no editing. It holds
+The block it writes is also a valid `BITFORT_IDENTITY_FILE`, so it needs no editing. The file
+must be mode 600, because the loader refuses a wider mode. `umask 077` sets that mode on a new
+file only, so run `chmod 600` when you write over a file that exists. It holds
 `BITFORT_IDENTITY`, `BITFORT_SIGN_IDENTITY`, and the `bfinvite1:` blob as a comment for a
 maintainer to add.
+
+With `--json` it prints one object instead, with the same three values. The keys
+`BITFORT_IDENTITY` and `BITFORT_SIGN_IDENTITY` are the variable names, and `invite` holds the
+blob. This form is not an identity file.
+
+```bash
+(umask 077; bitfort identity new --name ci --json > ~/ci.json)
+```
+
+Write either file outside the repository: `.gitignore` covers only `.env*`, so `git add` would
+pick it up. Delete the file after you put the values in your CI secret store. Both forms also
+print a warning on standard error.
 
 The minted identity is not stored in your keyring and is a member of nothing until a maintainer
 runs `member add` with that invite. See [CI and headless use](/docs/ci).

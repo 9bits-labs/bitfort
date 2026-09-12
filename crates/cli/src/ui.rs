@@ -83,8 +83,8 @@ impl Ui {
         }
     }
 
-    /// Whether the global `--json` flag asked for machine output. Read/report commands
-    /// branch on this to emit a structured payload instead of human text.
+    /// Whether the global `--json` flag asked for machine output. The commands that honor
+    /// it branch on this to emit a structured payload instead of human text.
     pub fn json(&self) -> bool {
         self.json
     }
@@ -296,8 +296,8 @@ impl Ui {
         }
     }
 
-    /// Print a machine payload to stdout as a single line of JSON, for `--json` read
-    /// commands. Never carries escape codes; the newline keeps it line-delimited.
+    /// Print a machine payload to stdout as a single line of JSON, for the commands that
+    /// honor `--json`. Never carries escape codes; the newline keeps it line-delimited.
     pub fn emit_json(&self, value: &serde_json::Value) {
         let mut out = anstream::stdout();
         let _ = writeln!(out, "{value}");

@@ -12,7 +12,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::process::Stdio;
 use std::time::Duration;
 
-use common::{bf, init_project, open_pty, raw_bf};
+use common::{bf, init_project, open_pty, raw_bf, Fixture};
 
 /// Run `identity new` with stdout on a real terminal, so the scrollback guard is exercised.
 /// Returns (exit code, everything the terminal saw).
@@ -46,6 +46,32 @@ fn on_a_terminal(
     (code, seen)
 }
 
+/// Let a maintainer add the minted member with `invite`, then read `API_KEY` on a second
+/// machine that holds only the printed pair. The caller stores `API_KEY=s3cret` first.
+fn assert_pair_reads_the_vault(f: &Fixture, enc: &str, sign: &str, invite: &str) {
+    // The minted key cannot decrypt the vault until `member add` runs.
+    bf(f.dir.path(), &f.id)
+        .args(["member", "add", invite])
+        .assert()
+        .success();
+
+    let read = assert_cmd::Command::cargo_bin("bitfort")
+        .unwrap()
+        .current_dir(f.dir.path())
+        .env("BITFORT_IDENTITY", enc)
+        .env("BITFORT_SIGN_IDENTITY", sign)
+        .env_remove("BITFORT_IDENTITY_FILE")
+        .args(["get", "API_KEY"])
+        .output()
+        .unwrap();
+    assert!(
+        read.status.success(),
+        "the minted identity could not read the vault: {}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&read.stdout).trim(), "s3cret");
+}
+
 /// The whole point of the command: a second machine, holding only the printed pair, can read
 /// the vault after a maintainer adds it. This is the CI recipe, end to end.
 #[test]
@@ -75,29 +101,7 @@ fn a_minted_identity_can_read_the_vault_once_a_maintainer_adds_it() {
             invite = Some(format!("bfinvite1:{v}"));
         }
     }
-    let (enc, sign, invite) = (enc.unwrap(), sign.unwrap(), invite.unwrap());
-
-    // Before the maintainer acts, the new key is a stranger to the vault.
-    bf(f.dir.path(), &f.id)
-        .args(["member", "add", &invite])
-        .assert()
-        .success();
-
-    let read = assert_cmd::Command::cargo_bin("bitfort")
-        .unwrap()
-        .current_dir(f.dir.path())
-        .env("BITFORT_IDENTITY", &enc)
-        .env("BITFORT_SIGN_IDENTITY", &sign)
-        .env_remove("BITFORT_IDENTITY_FILE")
-        .args(["get", "API_KEY"])
-        .output()
-        .unwrap();
-    assert!(
-        read.status.success(),
-        "the minted identity could not read the vault: {}",
-        String::from_utf8_lossy(&read.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&read.stdout).trim(), "s3cret");
+    assert_pair_reads_the_vault(&f, &enc.unwrap(), &sign.unwrap(), &invite.unwrap());
 }
 
 /// The printed block is also a valid `BITFORT_IDENTITY_FILE`, because the parser skips `#`
@@ -170,6 +174,39 @@ fn each_run_mints_a_different_identity() {
     assert!(!printed.contains(&mine), "minted the caller's own identity");
 }
 
+/// An automated caller provisions a CI or agent member with this command, so `--json` gives it
+/// one object instead of the text block, and the pair in it reads the vault.
+#[test]
+fn json_carries_a_working_pair_and_the_invite() {
+    let f = init_project();
+    bf(f.dir.path(), &f.id)
+        .args(["set", "API_KEY=s3cret"])
+        .assert()
+        .success();
+
+    let minted = bf(f.dir.path(), &f.id)
+        .args(["identity", "new", "--name", "ci", "--json"])
+        .output()
+        .unwrap();
+    assert!(minted.status.success());
+    let v: serde_json::Value =
+        serde_json::from_slice(&minted.stdout).expect("stdout is not valid JSON");
+    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["BITFORT_IDENTITY", "BITFORT_SIGN_IDENTITY", "invite"]
+    );
+    let field = |k: &str| v[k].as_str().unwrap();
+
+    assert_pair_reads_the_vault(
+        &f,
+        field("BITFORT_IDENTITY"),
+        field("BITFORT_SIGN_IDENTITY"),
+        field("invite"),
+    );
+}
+
 /// The scrollback guard, driven through a real terminal.
 #[test]
 fn it_refuses_a_terminal_without_force() {
@@ -181,10 +218,48 @@ fn it_refuses_a_terminal_without_force() {
         seen.contains("refusing to print a private identity to a terminal"),
         "missing the refusal:\n{seen}"
     );
+    // The age prefix finds the encryption secret in any output format; the variable name
+    // finds the line or the JSON key that would carry the signing secret.
     assert!(
-        !seen.contains("BITFORT_IDENTITY="),
+        !seen.contains("AGE-SECRET-KEY") && !seen.contains("BITFORT_SIGN_IDENTITY"),
         "a secret reached the terminal despite the guard:\n{seen}"
     );
+    // The suggested command must be the one the operator can run: a file outside the work
+    // tree, and no `--json` when the caller did not ask for it.
+    assert!(seen.contains("~/ci.key"), "wrong try command:\n{seen}");
+    assert!(!seen.contains("--json"), "wrong try command:\n{seen}");
+}
+
+/// With `--json` the guard still refuses a terminal, and the refusal is the JSON error object.
+#[test]
+fn json_refuses_a_terminal_with_a_json_error() {
+    let f = init_project();
+    let (code, seen) = on_a_terminal(f.dir.path(), &f.id, &["--json"]);
+
+    assert_ne!(code, 0, "expected a refusal, got success:\n{seen}");
+    assert!(
+        !seen.contains("AGE-SECRET-KEY") && !seen.contains("BITFORT_SIGN_IDENTITY"),
+        "a secret reached the terminal despite the guard:\n{seen}"
+    );
+    // One line of the capture is the error object; the pty carries stdout and stderr alike.
+    let line = seen
+        .lines()
+        .find(|l| l.starts_with('{'))
+        .expect("no JSON error printed");
+    let error: serde_json::Value =
+        serde_json::from_str(line.trim_end()).expect("the refusal is not JSON");
+    assert!(error["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("refusing to print a private identity to a terminal"));
+    // The suggested command keeps `--json`, so its output is the form the caller asked for.
+    let try_cmd = error["try"].as_str().unwrap();
+    assert!(try_cmd.contains("--json"), "wrong try command: {try_cmd}");
+    assert!(
+        try_cmd.contains("~/ci.json"),
+        "wrong try command: {try_cmd}"
+    );
+    assert!(try_cmd.contains("--force"), "wrong try command: {try_cmd}");
 }
 
 /// `--force` is the deliberate override, matching `export`.
@@ -202,4 +277,24 @@ fn force_prints_on_a_terminal() {
         seen.contains("BITFORT_SIGN_IDENTITY="),
         "the signing half is missing, so the pair is unusable:\n{seen}"
     );
+}
+
+/// `--json --force` prints the same object on a terminal that a pipe gets.
+#[test]
+fn json_force_prints_the_object_on_a_terminal() {
+    let f = init_project();
+    let (code, seen) = on_a_terminal(f.dir.path(), &f.id, &["--force", "--json"]);
+
+    assert_eq!(code, 0, "expected success with --force:\n{seen}");
+    let line = seen
+        .lines()
+        .find(|l| l.starts_with('{'))
+        .expect("no JSON object printed");
+    let v: serde_json::Value = serde_json::from_str(line.trim_end()).expect("the line is not JSON");
+    assert!(v["BITFORT_IDENTITY"]
+        .as_str()
+        .unwrap()
+        .starts_with("AGE-SECRET-KEY-"));
+    assert!(!v["BITFORT_SIGN_IDENTITY"].as_str().unwrap().is_empty());
+    assert!(v["invite"].as_str().unwrap().starts_with("bfinvite1:"));
 }

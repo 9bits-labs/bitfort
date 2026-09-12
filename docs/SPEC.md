@@ -491,6 +491,7 @@ Binary: `bitfort`. All commands operate on the `.bitfort/` dir found by walking 
 | `bitfort status` | One-screen readout of the environment's security posture (roster, vault, git/gitignore state) and the next step. Read path. |
 | `bitfort init [--name <n>]` | Create `.bitfort/`, generate initializer identity, pin anchor fingerprint, write `development` roster v1 + empty vault. Ensures `.env*` is gitignored. On a TTY it is a guided wizard (prompts name/first env, offers to import a discovered `.env` and to `git init`+commit); off a TTY it stays fully non-interactive with defaults. |
 | `bitfort keygen [--name <n>]` | Generate a local identity if none exists (idempotent); print public keys / invite blob. `--name` is the display name embedded in the invite. |
+| `bitfort identity new [--name <n>] [--force]` | Mint a fresh identity for a machine with no keyring (CI, containers) and print both secrets plus its invite blob (§7.1); never touches the keyring. Refuses a terminal without `--force`. `--json` prints one object with the keys `BITFORT_IDENTITY`, `BITFORT_SIGN_IDENTITY` and `invite`; that form is not an identity file. |
 | `bitfort import <path> [--env <name>] [--delete-source]` | Migrate an existing `.env` (or dotenv-format file) into the vault. The adoption on-ramp; advises deleting the source `.env` (or deletes it with `--delete-source`). |
 | `bitfort anchor [--share]` | Print the trust anchor (hex + 6-word phrase) to publish out-of-band; `--share` emits a plain paste block. |
 | `bitfort verify [--strict]` | Verify roster: signature chain, anti-rollback vs git history, anchor pin, env match. Exits non-zero on any hard failure; `--strict` also fails when protection is best-effort (e.g. outside a git repo), for CI. |
@@ -511,9 +512,11 @@ Binary: `bitfort`. All commands operate on the `.bitfort/` dir found by walking 
 | `bitfort man` | Print the man page in roff to stdout. |
 
 Global flags: `--env <name>` (selects environment; default `config.default_env`), `--dir <path>`,
-`--json` (machine output on the read/report commands; write commands ignore it), `-y`/`--yes`
-(skip the confirmation on destructive commands - `unset`, `member rm`, overwriting `set`; required
-off an interactive terminal), `-q`/`--quiet` (drop decorative output, keeping facts/data/errors).
+`--json` (JSON output on `status`, `list`, `verify`, `anchor`, `member list`, `env list` and
+`identity new`; other commands keep their text output, no command asks a question under it, and
+the terminal guards on `export` and `identity new` still refuse a terminal), `-y`/`--yes` (skip the confirmation on
+destructive commands - `unset`, `member rm`, overwriting `set`; required off an interactive
+terminal), `-q`/`--quiet` (drop decorative output, keeping facts/data/errors).
 Almost every command is environment-scoped; `--env` selects which roster+vault under
 `environments/` it acts on.
 
@@ -656,13 +659,17 @@ pub fn run(target: &str, args: &[String], mut secrets: HashMap<String, String>) 
 from (§3.1). The integration is **one generic pattern, not per-platform code**; BitFort ships no
 CI-provider integrations, only a documented recipe:
 
-1. Create a dedicated CI identity: `bitfort identity new --name ci > ci.key` (on a trusted
-   machine), then a maintainer runs `bitfort member add` with the invite blob it prints.
+1. Create a dedicated CI identity: `(umask 077; bitfort identity new --name ci > ~/ci.key)` (on
+   a trusted machine), then a maintainer runs `bitfort member add` with the invite blob it
+   prints. The file goes outside the repository, and `umask 077` gives a new file the 600 mode
+   the identity-file loader requires; writing over an existing file keeps that file's mode, so
+   `chmod 600` it.
    `keygen` cannot serve here: it is idempotent, so it returns the operator's own identity, and
    no command but `identity new` prints private key material.
 2. Store both halves as secrets in the CI platform (GitHub Actions secret, GitLab CI variable,
-   etc.), exposed to the job as `BITFORT_IDENTITY` and `BITFORT_SIGN_IDENTITY`. The printed
-   block is also a valid `BITFORT_IDENTITY_FILE` if the platform mounts files instead.
+   etc.), exposed to the job as `BITFORT_IDENTITY` and `BITFORT_SIGN_IDENTITY`. The printed text
+   block is also a valid `BITFORT_IDENTITY_FILE` if the platform mounts files instead; the
+   `--json` form is not.
 3. Check out **full history** - `actions/checkout` defaults to `fetch-depth: 1`, and a shallow
    clone cannot witness the highest committed `roster_version`, so anti-rollback is not enforced
    there (§4.3). Set `fetch-depth: 0` if the job runs `bitfort verify --strict`.

@@ -296,7 +296,10 @@ impl Roster {
                 m.enc_pubkey
                     .parse::<age::x25519::Recipient>()
                     .map_err(|e: &str| {
-                        Error::InvalidKey(format!("member '{}' enc_pubkey: {e}", m.name))
+                        Error::InvalidKey(format!(
+                            "member '{}' enc_pubkey: {e}",
+                            display_name(&m.name)
+                        ))
                     })
             })
             .collect()

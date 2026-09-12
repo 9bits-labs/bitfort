@@ -491,7 +491,7 @@ impl Vault {
             return Err(Error::VaultOrigin(format!(
                 "the '{expected_env}' vault's signature does not verify; its contents were \
                  modified after '{}' signed it",
-                member.name
+                crate::roster::display_name(&member.name)
             )));
         }
         // The audience: the ciphertext must open for that roster and for nobody else. A member

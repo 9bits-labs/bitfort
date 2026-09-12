@@ -45,12 +45,29 @@ pub fn init(ui: &Ui, start: Option<&Path>, name: Option<String>) -> Result<()> {
     // Name: a non-empty `--name` wins; otherwise prompt (default `$USER`) on a terminal, or
     // take the default silently off one. An empty/whitespace flag is treated as absent, as
     // the pre-wizard `resolve_name` did.
-    let name = match name.filter(|n| !n.trim().is_empty()) {
-        Some(n) => n.trim().to_string(),
-        None => ui.prompt("Your name?", &resolve_name(None)),
-    };
     // This name becomes the first roster member, so the same rule applies as for an invite.
-    bitfort_core::roster::validate_member_name(&name)?;
+    // A `--name` the rule refuses is an error, because the user can correct it and retry; a
+    // typed answer is re-asked instead, like the environment prompt below. Off a terminal
+    // `prompt` returns the default, which `resolve_name` has already checked, so this cannot
+    // loop.
+    let name = match name.filter(|n| !n.trim().is_empty()) {
+        Some(n) => {
+            let n = n.trim().to_string();
+            bitfort_core::roster::validate_member_name(&n)?;
+            n
+        }
+        None => loop {
+            let candidate = ui.prompt("Your name?", &resolve_name(None));
+            if bitfort_core::roster::validate_member_name(&candidate).is_ok() {
+                break candidate;
+            }
+            ui.status(
+                Level::Warn,
+                "invalid",
+                "use printable ASCII, at most 64 characters",
+            );
+        },
+    };
     // First environment: prompt (default `development`), re-asking until it's a valid name.
     // Off a terminal `prompt` returns the default immediately, so this cannot loop.
     let env = loop {
@@ -916,7 +933,11 @@ pub fn member_add(
         );
     }
 
-    let signer_name = acting_member_name(current, &identity);
+    // Sanitized, not validated: the acting name comes from the roster on disk, which an older
+    // build may have written before the rule existed. Refusing it would leave that team unable
+    // to change membership at all, while copying it raw would carry a forged row into the new
+    // signed roster.
+    let signer_name = bitfort_core::roster::display_name(&acting_member_name(current, &identity));
     let mut next = current.amend()?;
     next.members.push(Member {
         name: name.clone(),
@@ -988,16 +1009,25 @@ pub fn member_rm(
         );
     }
 
+    // The hint has to be runnable. A sanitized name does not match the roster entry, so where
+    // the stored name is one the rule refuses, the hint names the flag instead of the member.
+    let try_cmd = if bitfort_core::roster::validate_member_name(name).is_ok() {
+        format!("bitfort member rm {name} --yes")
+    } else {
+        "bitfort member rm <name> --yes".to_string()
+    };
     if !ui.confirm(
         &format!("Remove member '{shown}' from '{env}' and re-encrypt without their key?"),
         yes,
-        &format!("bitfort member rm {shown} --yes"),
+        &try_cmd,
     )? {
         ui.line(&ui.dim("aborted."));
         return Ok(());
     }
 
-    let signer_name = acting_member_name(current, &identity);
+    // Sanitized for the same reason as in `member_add`: an older roster's name must not travel
+    // into the roster this command signs.
+    let signer_name = bitfort_core::roster::display_name(&acting_member_name(current, &identity));
     let mut next = current.amend()?;
     next.members.retain(|m| m.name != name);
     next.sign(&identity, &signer_name)?;
@@ -1005,7 +1035,7 @@ pub fn member_rm(
     reencrypt_to_new_roster(project, env, &identity, &verified, &next)?;
 
     println!(
-        "Removed {name} from '{env}' (roster v{}).",
+        "Removed {shown} from '{env}' (roster v{}).",
         next.roster_version
     );
     println!(
@@ -1489,7 +1519,9 @@ impl VaultState {
                 if let Some(p) = provenance {
                     msg.push_str(&format!(
                         " · signed by {} for roster v{} on {}",
-                        p.signer, p.roster_version, p.written_at
+                        bitfort_core::roster::display_name(&p.signer),
+                        p.roster_version,
+                        p.written_at
                     ));
                 }
                 (Level::Ok, msg)
@@ -1747,7 +1779,7 @@ fn check_drift(vault: &Vault, roster: &Roster, env: &str, intent: Use) -> Result
                 if roster.member_by_sign_pubkey(&p.sign_pubkey).is_none() {
                     eprintln!(
                         "warning: it was written by '{}', who is not in roster v{to}",
-                        p.signer
+                        bitfort_core::roster::display_name(&p.signer)
                     );
                 }
             }

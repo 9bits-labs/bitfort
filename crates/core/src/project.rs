@@ -294,6 +294,11 @@ fn merge_base(
 /// the `\\?\` verbatim prefix `canonicalize` adds can't defeat `strip_prefix`. Callers are
 /// confirmed inside a repo, so a `target` outside `root` is anomalous and fails closed with
 /// an error rather than silently disabling the git-backed check.
+///
+/// A component that is not UTF-8 fails the same way. Dropping it would build a pathspec for a
+/// different file, and `git log` over a path nothing was ever committed at returns no
+/// revisions: for the anti-rollback ceiling that reads as version zero, which is the silent
+/// zero invariant 3 forbids.
 fn relativize_under_root(root: &Path, target: &Path) -> Result<String> {
     let target = target
         .canonicalize()
@@ -305,11 +310,19 @@ fn relativize_under_root(root: &Path, target: &Path) -> Result<String> {
             root.display()
         ))
     })?;
-    Ok(rel
+    let parts = rel
         .components()
-        .filter_map(|c| c.as_os_str().to_str())
-        .collect::<Vec<_>>()
-        .join("/"))
+        .map(|c| {
+            c.as_os_str().to_str().map(str::to_owned).ok_or_else(|| {
+                Error::Git(format!(
+                    "{} has a path component that is not UTF-8, so it cannot be used as a git \
+                     pathspec",
+                    target.display()
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(parts.join("/"))
 }
 
 /// What [`Project::load_vault_conflict`] found in git's index for a conflicted vault.
@@ -893,6 +906,29 @@ mod tests {
     use super::*;
     use crate::config::generate_project_id;
     use crate::roster::{Member, Role};
+
+    /// A silently dropped component would send `git log` at a different path, and a path with
+    /// no commits returns no revisions. The anti-rollback ceiling would then read zero, and a
+    /// rolled-back roster would pass. So the relativization fails closed instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_path_component_fails_rather_than_vanishing() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        // A real directory, canonicalized as `discover` leaves it, so `strip_prefix` sees the
+        // same prefix the callers pass.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let target = root.join(OsStr::from_bytes(b"\xff\xfe")).join("vault.enc");
+        let err = relativize_under_root(&root, &target).unwrap_err();
+        assert!(matches!(err, Error::Git(_)), "unexpected error: {err}");
+
+        // A UTF-8 path still relativizes to the `/`-joined pathspec git expects.
+        let ok = relativize_under_root(&root, &root.join(".bitfort/environments/dev/vault.enc"))
+            .unwrap();
+        assert_eq!(ok, ".bitfort/environments/dev/vault.enc");
+    }
 
     fn dev_config(anchor: &str) -> Config {
         Config::new(generate_project_id().unwrap(), "development", anchor)

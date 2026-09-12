@@ -46,8 +46,12 @@ impl Invite {
         let json = B64
             .decode(b64)
             .map_err(|e| Error::InvalidKey(format!("invite is not valid base64: {e}")))?;
-        serde_json::from_slice(&json)
-            .map_err(|e| Error::InvalidKey(format!("invite payload is malformed: {e}")))
+        let invite: Self = serde_json::from_slice(&json)
+            .map_err(|e| Error::InvalidKey(format!("invite payload is malformed: {e}")))?;
+        // The name reaches the signed roster and `member list` from here, so this is the
+        // boundary that has to refuse a name carrying a newline or a bidi character.
+        crate::roster::validate_member_name(&invite.name)?;
+        Ok(invite)
     }
 
     /// Check that both public keys actually parse, before anything is written.
@@ -87,6 +91,24 @@ mod tests {
         let blob = Invite::from_identity(&id, "alice").encode().unwrap();
         // The secret encryption key is `AGE-SECRET-KEY-...`; it must never appear.
         assert!(!blob.contains("SECRET"));
+    }
+
+    /// A name is chosen by whoever mints the invite, so it is untrusted input. A newline in
+    /// it would print as a second `member list` row that reads as a member nobody added.
+    #[test]
+    fn rejects_a_name_that_is_not_printable_text() {
+        let id = Identity::generate().unwrap();
+        for name in ["ci\nAAAA  maintainer", "ci\u{202E}x", "", " ci"] {
+            let blob = Invite::from_identity(&id, name).encode().unwrap();
+            assert!(
+                Invite::decode(&blob).is_err(),
+                "decoded an invite named {name:?}"
+            );
+        }
+        let blob = Invite::from_identity(&id, "ci bot (contractor)")
+            .encode()
+            .unwrap();
+        assert!(Invite::decode(&blob).is_ok());
     }
 
     #[test]

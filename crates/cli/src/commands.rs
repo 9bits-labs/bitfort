@@ -46,9 +46,11 @@ pub fn init(ui: &Ui, start: Option<&Path>, name: Option<String>) -> Result<()> {
     // take the default silently off one. An empty/whitespace flag is treated as absent, as
     // the pre-wizard `resolve_name` did.
     let name = match name.filter(|n| !n.trim().is_empty()) {
-        Some(n) => n,
+        Some(n) => n.trim().to_string(),
         None => ui.prompt("Your name?", &resolve_name(None)),
     };
+    // This name becomes the first roster member, so the same rule applies as for an invite.
+    bitfort_core::roster::validate_member_name(&name)?;
     // First environment: prompt (default `development`), re-asking until it's a valid name.
     // Off a terminal `prompt` returns the default immediately, so this cannot loop.
     let env = loop {
@@ -167,6 +169,8 @@ fn offer_initial_commit(ui: &Ui, project: &bitfort_core::Project) -> bool {
 /// keys plus a copy/paste invite blob for a maintainer to add (docs/SPEC.md §5.2).
 pub fn keygen(ui: &Ui, name: Option<String>) -> Result<()> {
     let name = resolve_name(name);
+    // Refuse here so a rejected name never reaches an invite blob.
+    bitfort_core::roster::validate_member_name(&name)?;
     let (identity, created) = match keystore::find_identity()? {
         Some(id) => (id, false),
         None => {
@@ -232,6 +236,8 @@ pub fn identity_new(ui: &Ui, name: Option<String>, force: bool) -> Result<()> {
     }
 
     let name = resolve_name(name);
+    // Refuse before a key exists, so a rejected name costs no minted identity on disk.
+    bitfort_core::roster::validate_member_name(&name)?;
     // Deliberately not `keystore::store_identity`: this identity belongs to another machine.
     let identity = Identity::generate()?;
     let (enc, sign) = (identity.enc_secret(), identity.sign_secret());
@@ -734,6 +740,15 @@ pub fn env_add(start: Option<&Path>, name: &str) -> Result<()> {
     // Reuse the holder's existing display name so it stays consistent across environments.
     let holder_name =
         anchor_member_name(&project, &config, &identity).unwrap_or_else(|| resolve_name(None));
+    // This name becomes the sole member of a fresh signed roster, so the same rule applies as
+    // for an invite. A name reused from an older environment can predate the rule, so the
+    // message says where it came from: the repair is in that roster, not in this command.
+    bitfort_core::roster::validate_member_name(&holder_name).map_err(|e| {
+        anyhow!(
+            "{e}\nthe name comes from an existing environment's roster, or from $USER; correct \
+             it there, then create the environment"
+        )
+    })?;
     let mut roster = Roster::new_v1(
         config.project_id.clone(),
         name,
@@ -864,14 +879,27 @@ pub fn member_add(
     // Untrusted input, pasted from a chat message. Reject malformed key material now, before
     // any file is written, so a bad key cannot leave the roster one version ahead of the vault.
     invite.validate_keys()?;
+    // `Invite::decode` already checked the name inside the blob; this covers the override,
+    // which reaches the signed roster by the same path.
     let name = name_override.unwrap_or_else(|| invite.name.clone());
+    let name = name.trim().to_string();
+    bitfort_core::roster::validate_member_name(&name)?;
     // Reject a member that would collide on identity (same signing key) or on name (which
     // `member rm` addresses by), either of which makes the roster ambiguous.
     if current.member_by_sign_pubkey(&invite.sign_pubkey).is_some() {
         bail!("that identity is already a member of '{env}'");
     }
-    if current.members.iter().any(|m| m.name == name) {
-        bail!("a member named '{name}' already exists in '{env}'; pass --name to disambiguate");
+    // Case-insensitively: `member rm` takes a name, and two members whose names differ only
+    // in case read as one row to whoever runs it, so the wrong seat can be revoked.
+    if let Some(existing) = current
+        .members
+        .iter()
+        .find(|m| m.name.eq_ignore_ascii_case(&name))
+    {
+        bail!(
+            "a member named '{}' already exists in '{env}'; pass --name to disambiguate",
+            bitfort_core::roster::display_name(&existing.name)
+        );
     }
     // And on the *encryption* key. Only the signing key was checked, so one decryption key
     // could hold two seats under different names - and `member rm` of one seat then left the
@@ -884,7 +912,7 @@ pub fn member_add(
         bail!(
             "that encryption key is already in '{env}' as '{}'\nAdding it twice would make \
              `member rm` unable to revoke it.",
-            existing.name
+            bitfort_core::roster::display_name(&existing.name)
         );
     }
 
@@ -930,11 +958,14 @@ pub fn member_rm(
     let (identity, verified) = authorize_maintainer(&opened, "change membership")?;
     let current = &verified.roster;
 
+    // Every message below echoes the argument, and a name typed here, or copied out of an
+    // older roster, can carry an escape sequence. The lookup still compares the raw bytes.
+    let shown = bitfort_core::roster::display_name(name);
     let target = current
         .members
         .iter()
         .find(|m| m.name == name)
-        .ok_or_else(|| anyhow!("no member named '{name}' in '{env}'"))?;
+        .ok_or_else(|| anyhow!("no member named '{shown}' in '{env}'"))?;
     // Refuse to strip the last maintainer: a roster with none can never authorize a
     // successor and permanently bricks the chain (docs/SPEC.md §5.4). `verify` enforces
     // this too, but failing here gives a clearer message before any write.
@@ -942,7 +973,7 @@ pub fn member_rm(
         // Not "promote another": there is no command that changes an existing member's role,
         // so that advice was a dead end. A second maintainer can only arrive as a new member.
         bail!(
-            "'{name}' is the only maintainer of '{env}'; add a second one first with \
+            "'{shown}' is the only maintainer of '{env}'; add a second one first with \
              `bitfort member add <invite> --maintainer`, then remove this one"
         );
     }
@@ -951,16 +982,16 @@ pub fn member_rm(
     // else's action anyway - a departing member should not be the last writer of the vault.
     if target.sign_pubkey == identity.sign_pubkey() {
         bail!(
-            "'{name}' is your own identity; a member cannot remove themselves from '{env}'.\n\
+            "'{shown}' is your own identity; a member cannot remove themselves from '{env}'.\n\
              Ask another maintainer to run this, so the re-encrypted vault is signed by \
              someone who stays."
         );
     }
 
     if !ui.confirm(
-        &format!("Remove member '{name}' from '{env}' and re-encrypt without their key?"),
+        &format!("Remove member '{shown}' from '{env}' and re-encrypt without their key?"),
         yes,
-        &format!("bitfort member rm {name} --yes"),
+        &format!("bitfort member rm {shown} --yes"),
     )? {
         ui.line(&ui.dim("aborted."));
         return Ok(());
@@ -1032,12 +1063,16 @@ pub fn member_list(ui: &Ui, start: Option<&Path>, env: Option<&str>) -> Result<(
 
     if !ui.interactive() {
         for m in &roster.members {
-            println!(
+            // Sanitized at the display boundary: a roster written by an older build can hold a
+            // newline, which prints as a row nobody added, or an escape that repaints the
+            // terminal. anstream is no help here: it strips escapes off a TTY but never a
+            // newline, and `CLICOLOR_FORCE` restores pass-through into a pipe.
+            ui.line(&format!(
                 "{}  {:<10}  {}",
                 bitfort_core::fingerprint_of(&m.enc_pubkey),
                 format!("{:?}", m.role).to_lowercase(),
-                m.name
-            );
+                bitfort_core::roster::display_name(&m.name)
+            ));
         }
         return Ok(());
     }
@@ -1072,15 +1107,18 @@ pub fn member_list(ui: &Ui, start: Option<&Path>, env: Option<&str>) -> Result<(
     let me = keystore::load_identity().ok().map(|id| id.sign_pubkey());
     for m in &roster.members {
         let is_me = me.as_ref().is_some_and(|k| *k == m.sign_pubkey);
+        // The table goes to a real terminal, where nothing strips an escape byte, so the
+        // sanitizer is what keeps an older roster's name from repainting the screen.
+        let safe = bitfort_core::roster::display_name(&m.name);
         let name_plain = if is_me {
-            format!("{} (you)", m.name)
+            format!("{safe} (you)")
         } else {
-            m.name.clone()
+            safe.clone()
         };
         let name = if is_me {
-            format!("{} {}", m.name, ui.dim("(you)"))
+            format!("{safe} {}", ui.dim("(you)"))
         } else {
-            m.name.clone()
+            safe.clone()
         };
         let role_str = format!("{:?}", m.role).to_lowercase();
         let role = match m.role {
@@ -2013,11 +2051,23 @@ fn resolve_name(explicit: Option<String>) -> String {
     // Filter each source as it is tried. Filtering only the final Option let a set-but-empty
     // `USER` win the `or_else` chain and then fall straight through to "owner", never
     // reaching `USERNAME`.
-    let usable = |s: String| Some(s).filter(|s| !s.trim().is_empty());
+    let usable = |s: String| {
+        let trimmed = s.trim().to_string();
+        Some(trimmed).filter(|t| !t.is_empty())
+    };
+    // A derived default is not something the user typed, so a `$USER` the name rule refuses
+    // falls through to the next source instead of failing the command. An explicit `--name`
+    // is returned as given, and the caller refuses it, because there the user can fix it.
+    let derived = |var: &str| {
+        std::env::var(var)
+            .ok()
+            .and_then(usable)
+            .filter(|n| bitfort_core::roster::validate_member_name(n).is_ok())
+    };
     explicit
         .and_then(usable)
-        .or_else(|| std::env::var("USER").ok().and_then(usable))
-        .or_else(|| std::env::var("USERNAME").ok().and_then(usable))
+        .or_else(|| derived("USER"))
+        .or_else(|| derived("USERNAME"))
         .unwrap_or_else(|| "owner".to_string())
 }
 

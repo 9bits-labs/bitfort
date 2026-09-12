@@ -54,6 +54,13 @@ pub enum Error {
     #[error("vault content rejected: {0}")]
     VaultContent(String),
 
+    /// A member display name is not printable text. The name travels inside the signed
+    /// roster and is printed back by `member list`, so a control character (a newline above
+    /// all) renders one member as two rows, and a bidi or zero-width character reorders what
+    /// a reviewer reads.
+    #[error("invalid member name: {0}")]
+    MemberName(String),
+
     #[error("keyring error: {0}")]
     Keyring(String),
 

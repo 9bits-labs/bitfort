@@ -163,6 +163,11 @@ re-encrypt. Maintainers only.
 `--maintainer` adds them with the right to sign roster changes. `--name <NAME>` overrides the
 name suggested in the invite.
 
+A display name must be printable ASCII (U+0020 to U+007E) of at most 64 characters. The name
+sits inside the signed roster and `member list` prints it back, so a newline would show one
+member as two rows, and an invisible character would make two members look the same, which
+sends `member rm` at the wrong one.
+
 ### `bitfort member rm <NAME>`
 
 Remove a member by display name, then re-sign and re-encrypt. Asks for confirmation. Refuses to

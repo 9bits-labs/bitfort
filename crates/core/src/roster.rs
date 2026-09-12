@@ -39,6 +39,61 @@ pub struct Member {
     pub added_at: String,
 }
 
+/// The longest display name a member may carry. A name is a label inside a signed payload,
+/// so its size is bounded like every other field there.
+pub const MAX_MEMBER_NAME: usize = 64;
+
+/// Reject a member display name that is not printable ASCII (docs/SPEC.md §5.2).
+///
+/// The name is chosen by whoever mints the invite, travels inside the signed roster, and is
+/// printed back by `member list`. Three attacks follow from an unchecked name. A newline
+/// renders one member as two rows, and the second row reads as a member nobody added. A bidi
+/// control reorders what a reviewer reads. An invisible letter, such as U+3164 HANGUL FILLER,
+/// makes two members look identical, so a maintainer who runs `member rm ci` removes the real
+/// member and leaves the impostor holding a vault seat. The roster signature covers all of
+/// this text, so verification cannot catch it: the name is refused before it is signed.
+///
+/// The rule is printable ASCII, U+0020 through U+007E. Every character in that range is
+/// visible and takes one column, which no wider rule can promise.
+pub fn validate_member_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(Error::MemberName("a name is required".into()));
+    }
+    if name != name.trim() {
+        return Err(Error::MemberName(
+            "a name may not start or end with whitespace".into(),
+        ));
+    }
+    let len = name.chars().count();
+    if len > MAX_MEMBER_NAME {
+        return Err(Error::MemberName(format!(
+            "{len} characters; the limit is {MAX_MEMBER_NAME}"
+        )));
+    }
+    match name.chars().find(|c| !is_printable(*c)) {
+        Some(c) => Err(Error::MemberName(format!(
+            "contains U+{:04X}; a name is printable ASCII, U+0020 to U+007E",
+            c as u32
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Printable ASCII: U+0020 through U+007E.
+fn is_printable(c: char) -> bool {
+    matches!(c, '\u{20}'..='\u{7E}')
+}
+
+/// A roster name rendered safe to print: every character [`validate_member_name`] refuses
+/// becomes U+FFFD. A `keys.json` written by an older build, or by a patched client, can hold
+/// a newline or an escape sequence, and a read path prints what it finds. The replacement is
+/// visible, so a reviewer sees that the name carries something the rule refuses.
+pub fn display_name(name: &str) -> String {
+    name.chars()
+        .map(|c| if is_printable(c) { c } else { '\u{FFFD}' })
+        .collect()
+}
+
 /// A detached Ed25519 signature over a payload's signing bytes. One shape for both signed
 /// payloads - the roster (`keys.json`) and the vault - so there is a single signature idiom
 /// on disk and a single verification routine behind it.
@@ -402,6 +457,54 @@ pub(crate) fn verifying_key(sign_pubkey: &str) -> Result<VerifyingKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The name is signed and printed back by `member list`. A newline forges a row nobody
+    /// approved, a bidi control reorders the text, and an invisible letter makes two members
+    /// look the same, which sends `member rm` at the wrong one.
+    #[test]
+    fn a_member_name_must_be_printable_ascii() {
+        for ok in [
+            "ci",
+            "Ada Lovelace",
+            "ci-bot (contractor)",
+            "a b~!@#$%^&*()",
+        ] {
+            assert!(validate_member_name(ok).is_ok(), "rejected {ok:?}");
+        }
+        for bad in [
+            "",
+            " ",
+            "ci ",
+            " ci",
+            "ci\nbf1:0000000000000000  maintainer  ops",
+            "ci\u{1b}[31m",
+            "ci\u{202E}spoof",
+            "ci\u{200B}x",
+            "ci\u{FEFF}",
+            "ci\u{061C}x",  // bidi control outside category Cc
+            "ci\u{2028}x",  // line separator, category Zl
+            "ci\u{00A0}x",  // no-break space
+            "ci\u{3164}",   // invisible Hangul filler: an impostor for "ci"
+            "ci\u{E0041}",  // tag character
+            "Jose\u{0301}", // combining mark
+            "José",         // non-ASCII letter
+        ] {
+            assert!(validate_member_name(bad).is_err(), "accepted {bad:?}");
+        }
+        assert!(validate_member_name(&"a".repeat(MAX_MEMBER_NAME)).is_ok());
+        assert!(validate_member_name(&"a".repeat(MAX_MEMBER_NAME + 1)).is_err());
+    }
+
+    /// A roster written by an older build can hold a name this rule refuses, and read paths
+    /// still print it. The sanitizer is what keeps those bytes off a terminal.
+    #[test]
+    fn display_name_replaces_what_the_rule_refuses() {
+        assert_eq!(display_name("ci-bot (contractor)"), "ci-bot (contractor)");
+        assert_eq!(display_name("ci\nops"), "ci\u{FFFD}ops");
+        assert_eq!(display_name("ci\u{1b}[31m"), "ci\u{FFFD}[31m");
+        assert_eq!(display_name("ci\u{3164}"), "ci\u{FFFD}");
+        assert_eq!(display_name("José"), "Jos\u{FFFD}");
+    }
 
     fn member(id: &Identity, name: &str, role: Role) -> Member {
         Member {

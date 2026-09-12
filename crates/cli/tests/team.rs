@@ -564,3 +564,119 @@ fn a_roster_grows_past_one_recipient_with_no_license() {
         .success()
         .stdout(predicate::str::contains("dave"));
 }
+
+/// Re-sign `development`'s roster with the initializer's name replaced by `forged`, so the
+/// project looks like one written before the name rule existed.
+fn rename_initializer(f: &common::Fixture, forged: &str) {
+    let project = Project::discover(f.dir.path()).unwrap();
+    let current = project.load_roster("development").unwrap();
+    let mut next = current.amend().unwrap();
+    next.members[0].name = forged.to_string();
+    next.sign(&f.id, "maintainer").unwrap();
+    let mut chain = project.load_chain("development").unwrap();
+    chain.append(current).unwrap();
+    project.save_chain("development", &chain).unwrap();
+    project.save_roster("development", &next).unwrap();
+}
+
+/// A roster written before this rule can still hold a forged name, and a read path prints
+/// what it finds. The display sanitizer keeps those bytes off the screen, and `env add`
+/// refuses to copy such a name into a new signed roster.
+#[test]
+fn a_forged_name_in_an_older_roster_is_sanitized_and_stops_spreading() {
+    let f = init_project();
+    rename_initializer(&f, "ops\u{1b}[31m\nbf1:0000000000000000  maintainer  admin");
+
+    // Piped, and with color forced, which restores anstream's pass-through.
+    for force in ["0", "1"] {
+        let out = bf(f.dir.path(), &f.id)
+            .env("CLICOLOR_FORCE", force)
+            .args(["member", "list"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        // The forged text still reads, but on the one row its member owns: the newline and
+        // the escape are replacement markers, so no second row and no repainted terminal.
+        assert_eq!(
+            text.lines().count(),
+            1,
+            "the name printed as more than one row: {text:?}"
+        );
+        assert!(
+            !text.lines().any(|l| l.starts_with("bf1:0000000000000000")),
+            "forged row reached the consumer: {text:?}"
+        );
+        assert!(!text.contains('\u{1b}'), "escape byte printed: {text:?}");
+        assert!(text.contains('\u{FFFD}'), "no replacement marker: {text:?}");
+    }
+
+    // `env add` reuses the holder's name for the new environment's roster.
+    bf(f.dir.path(), &f.id)
+        .args(["env", "add", "production"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid member name"));
+}
+
+/// `member rm` takes a name, so two members whose names differ only in case read as one row
+/// to the maintainer who revokes one of them.
+#[test]
+fn a_name_that_differs_only_in_case_is_refused() {
+    let f = init_git_project();
+    let bob = Identity::generate().unwrap();
+    bf(f.dir.path(), &f.id)
+        .args(["member", "add", &invite_for(&bob, "ci")])
+        .assert()
+        .success();
+    git_commit_all(f.dir.path(), "add ci");
+
+    let mallory = Identity::generate().unwrap();
+    bf(f.dir.path(), &f.id)
+        .args(["member", "add", &invite_for(&mallory, "CI")])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+}
+
+/// The display name comes from whoever mints the invite, travels inside the signed roster,
+/// and is printed back by `member list`. A newline in it adds a row that reads as a member
+/// nobody approved, and the roster signature then covers that forged text.
+#[test]
+fn a_name_that_would_forge_a_member_list_row_is_refused() {
+    let f = init_project();
+    let rogue = Identity::generate().unwrap();
+    let forged_name = "ci\nbf1:0000000000000000  maintainer  ops";
+
+    bf(f.dir.path(), &f.id)
+        .args(["member", "add", &invite_for(&rogue, forged_name)])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid member name"));
+
+    // The `--name` override reaches the roster by the same path, so it faces the same rule.
+    bf(f.dir.path(), &f.id)
+        .args([
+            "member",
+            "add",
+            &invite_for(&rogue, "ci"),
+            "--name",
+            forged_name,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid member name"));
+
+    // Minting refuses it too, so a rejected name costs no identity.
+    bf(f.dir.path(), &f.id)
+        .args(["identity", "new", "--name", forged_name])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid member name"));
+
+    // Nothing reached the roster: the initializer is still the only member.
+    bf(f.dir.path(), &f.id)
+        .args(["member", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("maintainer").count(1));
+}

@@ -503,7 +503,7 @@ Binary: `bitfort`. All commands operate on the `.bitfort/` dir found by walking 
 | `bitfort export [--format dotenv\|shell\|json] [--force]` | Print decrypted secrets (explicit, for CI bridges). Warns loudly; refuses to print to a terminal without `--force`. |
 | `bitfort env add <name>` | Create a new environment (own roster + vault), rooted at the same trust anchor. Anchor-holder only. |
 | `bitfort env list` | List environments and per-env roster/verification status. |
-| `bitfort member add <invite> [--maintainer] [--name <n>]` | (maintainer) Add recipient to the target env, bump+sign roster, re-encrypt. Requires the current roster to be committed. |
+| `bitfort member add <invite> [--maintainer] [--name <n>]` | (maintainer) Add recipient to the target env, bump+sign roster, re-encrypt. Requires the current roster to be committed. A display name must be printable ASCII (U+0020 to U+007E) of at most 64 characters, so it cannot forge a row in `member list` nor impersonate another member with an invisible character. |
 | `bitfort member rm <name>` | (maintainer) Remove recipient, bump+sign roster, re-encrypt (see rotate). Refuses the last maintainer. Confirms first (skip with `-y`). |
 | `bitfort member list` | Show the target env's roster and verification status. |
 | `bitfort rotate` | Re-encrypt vault to current roster with fresh ciphertext; advises rotating the upstream values via `bitfort set`. |

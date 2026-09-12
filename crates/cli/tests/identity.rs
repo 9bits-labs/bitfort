@@ -13,6 +13,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use common::{bf, init_project, open_pty, raw_bf, Fixture};
+use predicates::prelude::*;
 
 /// Run `identity new` with stdout on a real terminal, so the scrollback guard is exercised.
 /// Returns (exit code, everything the terminal saw).
@@ -205,6 +206,31 @@ fn json_carries_a_working_pair_and_the_invite() {
         field("BITFORT_SIGN_IDENTITY"),
         field("invite"),
     );
+}
+
+/// A derived default is not text the user typed. A `$USER` the name rule refuses falls
+/// through to the next source, so a container with a strange `$USER` still mints; an
+/// explicit `--name` is refused, because there the user can correct it.
+#[test]
+fn an_unusable_user_variable_falls_back_but_an_explicit_name_does_not() {
+    let f = init_project();
+    let minted = bf(f.dir.path(), &f.id)
+        .env("USER", "ci\nops")
+        .env_remove("USERNAME")
+        .args(["identity", "new"])
+        .output()
+        .unwrap();
+    assert!(
+        minted.status.success(),
+        "a bad $USER failed the command: {}",
+        String::from_utf8_lossy(&minted.stderr)
+    );
+
+    bf(f.dir.path(), &f.id)
+        .args(["identity", "new", "--name", "ci\nops"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid member name"));
 }
 
 /// The scrollback guard, driven through a real terminal.

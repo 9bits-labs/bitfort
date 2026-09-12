@@ -50,6 +50,8 @@ the on-disk format, never against the crates.
 
 - [`docs/SPEC.md`](docs/SPEC.md) is the design source of truth: the on-disk format, the signing
   bytes, the verification model, and the threat model with what each row does and does not cover.
+- [`docs/FORMAT.md`](docs/FORMAT.md) is the on-disk format at the byte level, with test vectors,
+  for anyone writing a compatible implementation.
 - [`docs/cli.mdx`](docs/cli.mdx) is the command reference, pinned to the binary by a test that
   fails the build when the two drift.
 

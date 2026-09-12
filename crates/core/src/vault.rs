@@ -561,6 +561,361 @@ impl Vault {
     }
 }
 
+/// Byte-exact vectors for the on-disk format, so a second implementation can check itself
+/// and so a change to the signed bytes fails here instead of silently breaking verification
+/// (invariant 4). The values are published in `docs/FORMAT.md`; both are generated from the
+/// two fixed identities below, never hand written.
+///
+/// It lives in this file because [`Document`] and its signing view are private to it.
+#[cfg(test)]
+mod format_vectors {
+    use super::*;
+    use crate::identity::Identity;
+    use crate::roster::{Member, Role, Roster};
+
+    /// Throwaway keys, minted once for this suite and used nowhere else.
+    const A_ENC: &str =
+        "AGE-SECRET-KEY-1J6A8M346N442F3XU9FMF29S2XW2CPA2JG87U7XGWTWAFSF9QAFRQS4E3WR";
+    const A_SIGN: &str = "l65v1wJvkVmayp0xCu1ZJSQK6J2Al4wk8GKYHMt8IG8=";
+    const B_ENC: &str =
+        "AGE-SECRET-KEY-135A88F9GNWMLJJEW8PX00WNMHEJ9GF7J3P3S5UKXQ6PM6P56SARS9QQDPR";
+    const B_SIGN: &str = "0VeeF+Y6m4h6tKTKalUScvCgTVLgu2qvdT74QqlEUZU=";
+
+    const PROJECT_ID: &str = "00112233445566778899aabbccddeeff";
+    const ENV: &str = "development";
+    const WRITTEN_AT: &str = "2026-01-02T03:04:05Z";
+
+    fn identities() -> (Identity, Identity) {
+        (
+            Identity::from_secret_strings(A_ENC, A_SIGN).unwrap(),
+            Identity::from_secret_strings(B_ENC, B_SIGN).unwrap(),
+        )
+    }
+
+    fn member(id: &Identity, name: &str, role: Role, added_by: &str) -> Member {
+        Member {
+            name: name.into(),
+            enc_pubkey: id.enc_pubkey(),
+            sign_pubkey: id.sign_pubkey(),
+            role,
+            added_by: added_by.into(),
+            added_at: WRITTEN_AT.into(),
+        }
+    }
+
+    /// Roster v1, signed by A; then v2 adding B, signed by A.
+    fn rosters() -> (Roster, Roster) {
+        let (a, b) = identities();
+        let mut v1 = Roster::new_v1(
+            PROJECT_ID,
+            ENV,
+            vec![member(&a, "ada", Role::Maintainer, "ada")],
+        );
+        v1.sign(&a, "ada").unwrap();
+
+        let mut v2 = v1.amend().unwrap();
+        v2.members.push(member(&b, "bob", Role::Member, "ada"));
+        v2.sign(&a, "ada").unwrap();
+        (v1, v2)
+    }
+
+    /// The vault payload as `encrypt` builds it, with the clock pinned so the bytes are
+    /// reproducible. `encrypt` itself stamps the real time and produces randomised
+    /// ciphertext, so the vector covers the payload, which is what a signature is over.
+    fn document(roster: &Roster, signer: &Identity, signer_name: &str) -> Document<'static> {
+        let mut vars = BTreeMap::new();
+        vars.insert("API_KEY".to_string(), "sk-test-123".to_string());
+        vars.insert(
+            "DATABASE_URL".to_string(),
+            "postgres://localhost/app".to_string(),
+        );
+        let mut doc = Document {
+            schema_version: SCHEMA_VERSION,
+            project_id: Cow::Owned(roster.project_id.clone()),
+            env: Cow::Owned(roster.env.clone()),
+            roster_version: roster.roster_version,
+            vars: Cow::Owned(vars),
+            written_at: Cow::Owned(WRITTEN_AT.to_string()),
+            signature: Signature::placeholder(),
+        };
+        doc.signature = Signature::create(signer, signer_name, &doc.signing_bytes().unwrap());
+        doc
+    }
+
+    /// The key encodings a second implementation has to reproduce: `age1` for the encryption
+    /// key, `ed25519:` plus standard base64 for the signing key, and `bf1:` plus the first 8
+    /// bytes of a SHA-256 for both the display fingerprint and the trust anchor. The anchor
+    /// hashes `enc_pubkey`, a `|` separator, then `sign_pubkey`.
+    #[test]
+    fn identity_encodings_are_pinned() {
+        let (a, b) = identities();
+
+        assert_eq!(
+            a.enc_pubkey(),
+            "age1wv5cdjkemks5sg7l06dj9ju2h9almvcll2fdud67ejd8mp9pcgpqychk7v"
+        );
+        assert_eq!(
+            a.sign_pubkey(),
+            "ed25519:jGku5Qk3/X47h46w0HOUYZWWMQfYLuQUBNd8yMkxAYI="
+        );
+        assert_eq!(a.fingerprint(), "bf1:5ba1231767d596e9");
+        assert_eq!(a.anchor(), "bf1:087bd1e8699b49a9");
+
+        assert_eq!(
+            b.enc_pubkey(),
+            "age1kn4vdzw53qcqrvls57tjpnds0nfmg820ztnaru04w9e5dmwapv9qfqwya5"
+        );
+        assert_eq!(
+            b.sign_pubkey(),
+            "ed25519:XrfzFm7LaChQRjaOEPk1d8zCmIhrhPMA01oq6oK6uTw="
+        );
+        assert_eq!(b.fingerprint(), "bf1:bda3f84a115f39e8");
+        assert_eq!(b.anchor(), "bf1:f19a418502ea45ce");
+    }
+
+    /// The roster's signing bytes: the domain tag, a newline, then RFC 8785 JCS over every
+    /// field except `signatures`. Ed25519 is deterministic, so the signature is a constant
+    /// too, and any reordering, added field or changed tag moves all three values.
+    #[test]
+    fn roster_signing_bytes_are_pinned() {
+        let (v1, v2) = rosters();
+
+        let expected = concat!(
+            "bitfort-roster-v1\n",
+            r#"{"env":"development","members":[{"added_at":"2026-01-02T03:04:05Z","#,
+            r#""added_by":"ada","enc_pubkey":"age1wv5cdjkemks5sg7l06dj9ju2h9almvcll2fdud67ejd8mp9pcgpqychk7v","#,
+            r#""name":"ada","role":"maintainer","#,
+            r#""sign_pubkey":"ed25519:jGku5Qk3/X47h46w0HOUYZWWMQfYLuQUBNd8yMkxAYI="}],"#,
+            r#""prev_digest":null,"project_id":"00112233445566778899aabbccddeeff","#,
+            r#""roster_version":1,"schema_version":1}"#,
+        );
+        assert_eq!(
+            String::from_utf8(v1.signing_bytes().unwrap()).unwrap(),
+            expected
+        );
+        assert_eq!(v1.signing_bytes().unwrap().len(), 389);
+        assert_eq!(
+            v1.digest().unwrap(),
+            "daccf26f3f0d1cffb03a11de57cae4b4e8b5ec2ffdde64732d5b23910cf2e706"
+        );
+        assert_eq!(
+            v1.signatures[0].signature,
+            "yu8/piwS4PXeuQ57OZG+mYDi92WI5djxBuhyFoF2Ki98iSpYtweGt5y6An4UZBDJwM7dU3wPIxAtVDWha1hsDQ=="
+        );
+
+        // v2 pins its predecessor by that digest, which is what makes the chain in
+        // `chain.json` tamper-evident: a swapped link breaks the successor's digest.
+        assert_eq!(
+            v2.prev_digest.as_deref(),
+            Some(v1.digest().unwrap().as_str())
+        );
+        let v2_expected = concat!(
+            "bitfort-roster-v1\n",
+            r#"{"env":"development","members":[{"added_at":"2026-01-02T03:04:05Z","#,
+            r#""added_by":"ada","enc_pubkey":"age1wv5cdjkemks5sg7l06dj9ju2h9almvcll2fdud67ejd8mp9pcgpqychk7v","#,
+            r#""name":"ada","role":"maintainer","#,
+            r#""sign_pubkey":"ed25519:jGku5Qk3/X47h46w0HOUYZWWMQfYLuQUBNd8yMkxAYI="},"#,
+            r#"{"added_at":"2026-01-02T03:04:05Z","added_by":"ada","#,
+            r#""enc_pubkey":"age1kn4vdzw53qcqrvls57tjpnds0nfmg820ztnaru04w9e5dmwapv9qfqwya5","#,
+            r#""name":"bob","role":"member","#,
+            r#""sign_pubkey":"ed25519:XrfzFm7LaChQRjaOEPk1d8zCmIhrhPMA01oq6oK6uTw="}],"#,
+            r#""prev_digest":"daccf26f3f0d1cffb03a11de57cae4b4e8b5ec2ffdde64732d5b23910cf2e706","#,
+            r#""project_id":"00112233445566778899aabbccddeeff","#,
+            r#""roster_version":2,"schema_version":1}"#,
+        );
+        assert_eq!(
+            String::from_utf8(v2.signing_bytes().unwrap()).unwrap(),
+            v2_expected
+        );
+        assert_eq!(v2.signing_bytes().unwrap().len(), 680);
+        assert_eq!(
+            v2.digest().unwrap(),
+            "efef046306e124012ef0c79f9ed9f53895087a4d9877c393c90cd24e87594ed1"
+        );
+        assert_eq!(
+            v2.signatures[0].signature,
+            "hznf1ek8mEHbya36rJFJ6Dcgm716YpUgbUEXy2OEiwKzq4WgY7JDIcmnpr04r2lVLocA2fK8iaiEgD66vObeAw=="
+        );
+    }
+
+    /// The vault payload's signing bytes carry their own domain tag, so a roster signature
+    /// can never verify over a vault payload. `signature` is outside the signed view, which
+    /// is what lets the document be signed from exactly the fields that get written.
+    #[test]
+    fn vault_payload_signing_bytes_are_pinned() {
+        let (a, _) = identities();
+        let (v1, _) = rosters();
+        let doc = document(&v1, &a, "ada");
+
+        let expected = concat!(
+            "bitfort-vault-v1\n",
+            r#"{"env":"development","project_id":"00112233445566778899aabbccddeeff","#,
+            r#""roster_version":1,"schema_version":1,"#,
+            r#""vars":{"API_KEY":"sk-test-123","DATABASE_URL":"postgres://localhost/app"},"#,
+            r#""written_at":"2026-01-02T03:04:05Z"}"#,
+        );
+        assert_eq!(
+            String::from_utf8(doc.signing_bytes().unwrap()).unwrap(),
+            expected
+        );
+        assert_eq!(doc.signing_bytes().unwrap().len(), 235);
+        assert_eq!(
+            doc.signature.signature,
+            "3PRG0An/6Cy7DrkF8DM44HxNHY8fsSkZXLOGWkH4hXau0b7YbK/jNwka2e/2T5foqgkguN3u7xbnXTTlz8tBCg=="
+        );
+
+        // And the plaintext that gets encrypted is the signed view plus the signature.
+        let written = String::from_utf8(serde_jcs::to_vec(&doc).unwrap()).unwrap();
+        assert!(written.starts_with(r#"{"env":"development","project_id":"#));
+        assert!(written.contains(r#""signer":"ada""#));
+    }
+
+    /// The invite blob a new member hands a maintainer: the prefix, then standard base64 of
+    /// the three public fields. It is the one payload that travels outside the repository, so
+    /// a second implementation has to encode it identically.
+    #[test]
+    fn the_invite_blob_is_pinned() {
+        let (a, _) = identities();
+        let blob = crate::invite::Invite::from_identity(&a, "ada")
+            .encode()
+            .unwrap();
+
+        assert_eq!(
+            blob,
+            concat!(
+                "bfinvite1:eyJuYW1lIjoiYWRhIiwiZW5jX3B1YmtleSI6ImFnZTF3djVjZGprZW1rczVzZzds",
+                "MDZkajlqdTJoOWFsbXZjbGwyZmR1ZDY3ZWpkOG1wOXBjZ3BxeWNoazd2Iiwic2lnbl9wdWJr",
+                "ZXkiOiJlZDI1NTE5OmpHa3U1UWszL1g0N2g0NncwSE9VWVpXV01RZllMdVFVQk5kOHlNa3hB",
+                "WUk9In0=",
+            )
+        );
+        // And it round-trips, so the vector pins a blob a reader accepts.
+        let back = crate::invite::Invite::decode(&blob).unwrap();
+        assert_eq!(back.name, "ada");
+        assert_eq!(back.enc_pubkey, a.enc_pubkey());
+        assert_eq!(back.sign_pubkey, a.sign_pubkey());
+    }
+
+    /// The armor framing, and the stanza a counter has to ignore. `age` adds one randomly
+    /// tagged `-grease` recipient stanza to every file, so a reader that counts every `-> `
+    /// line sees one more recipient than the roster has members and refuses a genuine vault.
+    /// This is the rule [`recipient_count`] implements and the one `docs/FORMAT.md` has to
+    /// state.
+    #[test]
+    fn the_armor_carries_one_grease_stanza_beyond_the_members() {
+        let (a, _) = identities();
+        let (v1, _) = rosters();
+        let mut vault = Vault::new(ENV);
+        vault.set("API_KEY", "sk-test-123").unwrap();
+        let armored = vault.encrypt(&v1, &a).unwrap();
+
+        assert!(armored.starts_with("-----BEGIN AGE ENCRYPTED FILE-----"));
+        assert!(armored
+            .trim_end()
+            .ends_with("-----END AGE ENCRYPTED FILE-----"));
+
+        // The armor wraps the whole age file in base64, so the stanzas are not lines of the
+        // file. Read the decoded header, the way `recipient_count` does.
+        use std::io::BufRead;
+        let mut reader = std::io::BufReader::new(ArmoredReader::new(armored.as_bytes()));
+        let mut stanzas: Vec<String> = Vec::new();
+        loop {
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).unwrap() > 0, "truncated header");
+            if line.starts_with("---") {
+                break;
+            }
+            if let Some(rest) = line.strip_prefix("-> ") {
+                stanzas.push(rest.trim_end().to_string());
+            }
+        }
+
+        assert_eq!(
+            v1.members.len(),
+            1,
+            "this vector assumes the one-member roster"
+        );
+        assert_eq!(
+            stanzas.len(),
+            2,
+            "expected one member stanza plus one grease stanza: {stanzas:?}"
+        );
+        assert_eq!(
+            stanzas
+                .iter()
+                .filter(|s| s.split(' ').next().unwrap_or("").ends_with("-grease"))
+                .count(),
+            1,
+            "expected exactly one grease stanza: {stanzas:?}"
+        );
+        // And the counter the format rule is written against ignores it.
+        assert_eq!(recipient_count(&armored).unwrap(), 1);
+    }
+
+    /// Print every vector, for transcribing into `docs/FORMAT.md`. Ignored by default: it
+    /// asserts nothing, and the tests above are what guard the format.
+    ///
+    /// Rerunning this after a deliberate format change is how the vectors move. Review the
+    /// diff it produces in `docs/FORMAT.md`, not only the test result: a regenerated vector
+    /// makes any change to the signed bytes pass.
+    #[test]
+    #[ignore = "generator: cargo test -p bitfort-core --lib format_vectors::print -- --ignored --nocapture"]
+    fn print_the_vectors() {
+        let (a, b) = identities();
+        let (v1, v2) = rosters();
+        let doc = document(&v1, &a, "ada");
+
+        println!("A enc_pubkey  = {}", a.enc_pubkey());
+        println!("A sign_pubkey = {}", a.sign_pubkey());
+        println!("A fingerprint = {}", a.fingerprint());
+        println!("A anchor      = {}", a.anchor());
+        println!("B enc_pubkey  = {}", b.enc_pubkey());
+        println!("B sign_pubkey = {}", b.sign_pubkey());
+        println!("B fingerprint = {}", b.fingerprint());
+        println!("B anchor      = {}", b.anchor());
+
+        let v1_bytes = v1.signing_bytes().unwrap();
+        println!("\nroster v1 signing bytes ({} bytes):", v1_bytes.len());
+        println!("{}", String::from_utf8_lossy(&v1_bytes));
+        println!("roster v1 digest    = {}", v1.digest().unwrap());
+        println!("roster v1 signature = {}", v1.signatures[0].signature);
+        println!("roster v2 prev_digest = {:?}", v2.prev_digest);
+        println!("roster v2 digest      = {}", v2.digest().unwrap());
+        println!("roster v2 signature   = {}", v2.signatures[0].signature);
+
+        let v2_bytes = v2.signing_bytes().unwrap();
+        println!("\nroster v2 signing bytes ({} bytes):", v2_bytes.len());
+        println!("{}", String::from_utf8_lossy(&v2_bytes));
+
+        println!(
+            "\ninvite blob for A:\n{}",
+            crate::invite::Invite::from_identity(&a, "ada")
+                .encode()
+                .unwrap()
+        );
+
+        let doc_bytes = doc.signing_bytes().unwrap();
+        println!("\nvault payload signing bytes ({} bytes):", doc_bytes.len());
+        println!("{}", String::from_utf8_lossy(&doc_bytes));
+        println!("vault signature = {}", doc.signature.signature);
+
+        // The armor header, so the document can show the framing and the grease stanza a
+        // recipient counter has to ignore.
+        let mut vault = Vault::new(ENV);
+        vault.set("API_KEY", "sk-test-123").unwrap();
+        let armored = vault.encrypt(&v1, &a).unwrap();
+        println!("\narmor header:");
+        for line in armored.lines().take(6) {
+            println!("{line}");
+        }
+        println!("recipient_count = {}", recipient_count(&armored).unwrap());
+        println!(
+            "\nvault document as written (JCS):\n{}",
+            String::from_utf8_lossy(&serde_jcs::to_vec(&doc).unwrap())
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

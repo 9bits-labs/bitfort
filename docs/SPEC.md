@@ -127,6 +127,7 @@ my-project/
         │   ├── keys.json      # signed roster for this environment (public keys only)
         │   ├── chain.json     # every predecessor of keys.json, signed, in order
         │   └── vault.enc      # age-encrypted secrets, one recipient stanza per member
+        │                      #   (plus the `-grease` decoy age writes into every header)
         └── production/
             ├── keys.json      # a *different*, usually smaller roster
             ├── chain.json
@@ -134,6 +135,12 @@ my-project/
 ```
 
 Every file is committed to Git. None contains plaintext secrets or private keys.
+
+The sections below give the shape of each file and the reasoning behind it.
+[`FORMAT.md`](FORMAT.md) is the byte-exact companion: field sets, encodings, the signing-byte
+construction, and generated test vectors that a compatible implementation can check itself
+against. Where the two disagree about bytes, `FORMAT.md` is authoritative, because its vectors
+are pinned by a test.
 
 ### 4.1 Environments and least privilege
 

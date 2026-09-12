@@ -9,6 +9,9 @@ members = ["crates/core", "crates/cli"]
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.96"
+license = "Apache-2.0"
+# Nothing here goes to crates.io: the supported artifact is the `bitfort` binary, and the
+# crates carry no stable API (see README.md).
 publish = false
 
 # Dev builds keep file:line for panic backtraces but drop the variable/type

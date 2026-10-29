@@ -324,3 +324,62 @@ fn json_force_prints_the_object_on_a_terminal() {
     assert!(!v["BITFORT_SIGN_IDENTITY"].as_str().unwrap().is_empty());
     assert!(v["invite"].as_str().unwrap().starts_with("bfinvite1:"));
 }
+
+/// The printed pair is the only copy of the minted key, so a write that fails must fail the
+/// command, and the warning that a key was printed must not follow it. A file size limit of
+/// zero, with `SIGXFSZ` ignored, makes each write to the stdout file return `EFBIG`, which
+/// stands in for a full disk. `member list` covers the human emitters the same way, and the
+/// commands after it the plain output written past them, which used to panic with exit 101.
+#[test]
+fn a_failed_write_to_stdout_exits_nonzero() {
+    use std::os::unix::process::CommandExt;
+
+    let f = init_project();
+    bf(f.dir.path(), &f.id)
+        .args(["set", "API_KEY=s3cret"])
+        .assert()
+        .success();
+    for args in [
+        &["identity", "new", "--json"][..],
+        &["identity", "new"],
+        &["member", "list"],
+        &["get", "API_KEY"],
+        &["list"],
+        &["export"],
+        &["verify"],
+        &["anchor", "--share"],
+        &["completions", "bash"],
+        &["man"],
+    ] {
+        let mut cmd = raw_bf(f.dir.path(), &f.id);
+        cmd.args(args)
+            .stdout(std::fs::File::create(f.dir.path().join("out")).unwrap());
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+                let none = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::setrlimit(libc::RLIMIT_FSIZE, &none) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let out = cmd.output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "{args:?} exited 0 after a failed write:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("could not write to standard output"),
+            "{args:?} did not name the failed write:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("this printed a private identity"),
+            "{args:?} claimed to print a key it did not write:\n{stderr}"
+        );
+    }
+}

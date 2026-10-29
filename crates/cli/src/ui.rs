@@ -11,6 +11,23 @@
 use std::io::{IsTerminal, Write};
 
 use anstyle::{AnsiColor, Style};
+use anyhow::Context;
+
+/// The error a failed write to stdout becomes, from [`Ui`]'s emitters and from [`outln!`]
+/// alike, so one failure reads the same from every command.
+pub const WRITE_FAILED: &str = "could not write to standard output";
+
+/// `println!` for output that does not go through [`Ui`]: a value from `get`, the stable plain
+/// lines a script matches. It returns a failed write as [`WRITE_FAILED`] where `println!`
+/// panics with exit 101. It writes to `std::io::stdout()`, not anstream, because anstream
+/// strips escape bytes off a terminal and a secret must arrive as stored.
+macro_rules! outln {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        anyhow::Context::context(writeln!(std::io::stdout(), $($arg)*), $crate::ui::WRITE_FAILED)
+    }};
+}
+pub(crate) use outln;
 
 /// Severity of a status line, selecting its glyph and color.
 #[derive(Clone, Copy)]
@@ -216,46 +233,48 @@ impl Ui {
 
     // --- emitters ---
 
-    fn emit(&self, line: String) {
-        let mut out = anstream::stdout();
-        let _ = writeln!(out, "{line}");
+    /// Write one line to stdout. A failed write is an error the command returns, not one it
+    /// drops: `identity new` prints the only copy of a minted key, and a full disk must not
+    /// lose it under exit 0. Every emitter below returns this result for the same reason.
+    fn emit(&self, line: impl std::fmt::Display) -> anyhow::Result<()> {
+        writeln!(anstream::stdout(), "{line}").context(WRITE_FAILED)
     }
 
     /// A bold title line. Decorative, so `--quiet` drops it.
-    pub fn header(&self, text: &str) {
+    pub fn header(&self, text: &str) -> anyhow::Result<()> {
         if self.quiet {
-            return;
+            return Ok(());
         }
-        self.emit(self.bold(text));
+        self.emit(self.bold(text))
     }
 
-    pub fn status(&self, level: Level, label: &str, value: &str) {
-        self.emit(self.render_status(level, label, value));
+    pub fn status(&self, level: Level, label: &str, value: &str) -> anyhow::Result<()> {
+        self.emit(self.render_status(level, label, value))
     }
 
-    pub fn field(&self, label: &str, value: &str) {
-        self.emit(self.render_field(label, value));
+    pub fn field(&self, label: &str, value: &str) -> anyhow::Result<()> {
+        self.emit(self.render_field(label, value))
     }
 
     /// A dim `→` next-step suggestion. Guidance chrome, so `--quiet` drops it.
-    pub fn hint(&self, text: &str) {
+    pub fn hint(&self, text: &str) -> anyhow::Result<()> {
         if self.quiet {
-            return;
+            return Ok(());
         }
-        self.emit(self.render_hint(text));
+        self.emit(self.render_hint(text))
     }
 
     /// A spacer line. Decorative, so `--quiet` drops it to keep output compact.
-    pub fn blank(&self) {
+    pub fn blank(&self) -> anyhow::Result<()> {
         if self.quiet {
-            return;
+            return Ok(());
         }
-        self.emit(String::new());
+        self.emit("")
     }
 
     /// Emit a pre-composed line verbatim, for command-built tables.
-    pub fn line(&self, text: &str) {
-        self.emit(text.to_owned());
+    pub fn line(&self, text: &str) -> anyhow::Result<()> {
+        self.emit(text)
     }
 
     // --- styled fragments, for composing table rows and titles ---
@@ -298,9 +317,8 @@ impl Ui {
 
     /// Print a machine payload to stdout as a single line of JSON, for the commands that
     /// honor `--json`. Never carries escape codes; the newline keeps it line-delimited.
-    pub fn emit_json(&self, value: &serde_json::Value) {
-        let mut out = anstream::stdout();
-        let _ = writeln!(out, "{value}");
+    pub fn emit_json(&self, value: &serde_json::Value) -> anyhow::Result<()> {
+        self.emit(value)
     }
 
     /// Gate a destructive action (`unset`, `member rm`, a `set` overwrite) behind a

@@ -6,10 +6,11 @@ mod commands;
 mod run;
 mod ui;
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use anyhow::Context;
 use clap::builder::styling::{AnsiColor, Style, Styles};
 use clap::{CommandFactory, Parser, Subcommand};
 
@@ -67,7 +68,8 @@ fn print_banner_before_help(err: &clap::Error) {
     );
     if is_help_or_version && std::io::stdout().is_terminal() {
         let color = std::env::var_os("NO_COLOR").is_none();
-        println!("{}\n", styled_banner(color));
+        // A failed write is ignored, as clap ignores one for the help text that follows.
+        let _ = writeln!(std::io::stdout(), "{}\n", styled_banner(color));
     }
 }
 
@@ -355,18 +357,19 @@ fn main() -> ExitCode {
         }
         // Structural commands: generated from the clap definition itself, no project needed.
         Command::Completions { shell } => {
-            clap_complete::generate(
-                shell,
-                &mut Cli::command(),
-                "bitfort",
-                &mut std::io::stdout(),
-            );
-            Ok(0)
+            // Rendered into memory first: `generate` panics on a failed write, and a `Vec`
+            // write cannot fail.
+            let mut script = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), "bitfort", &mut script);
+            std::io::stdout()
+                .write_all(&script)
+                .map(|()| 0)
+                .context(ui::WRITE_FAILED)
         }
         Command::Man => clap_mangen::Man::new(Cli::command())
             .render(&mut std::io::stdout())
-            .map(|_| 0)
-            .map_err(anyhow::Error::from),
+            .map(|()| 0)
+            .context(ui::WRITE_FAILED),
     };
 
     match result {

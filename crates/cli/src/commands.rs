@@ -2,6 +2,7 @@
 //! crypto, roster, and project logic lives in the core crate (docs/SPEC.md §9.1), so
 //! this layer only handles argument shaping, prompting, and user-facing output.
 
+use std::io::Write as _;
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -14,7 +15,7 @@ use bitfort_core::{
     Vault,
 };
 
-use crate::ui::{Failure, Level, Ui};
+use crate::ui::{outln, Failure, Level, Ui, WRITE_FAILED};
 
 /// `bitfort init`: a guided setup that creates `.bitfort/`, generates/adopts the
 /// initializer identity, pins the trust anchor, and writes a signed v1 roster + empty
@@ -38,8 +39,8 @@ pub fn init(ui: &Ui, start: Option<&Path>, name: Option<String>) -> Result<()> {
     }
 
     if ui.interactive() {
-        ui.header("Set up BitFort");
-        ui.blank();
+        ui.header("Set up BitFort")?;
+        ui.blank()?;
     }
 
     // Name: a non-empty `--name` wins; otherwise prompt (default `$USER`) on a terminal, or
@@ -65,7 +66,7 @@ pub fn init(ui: &Ui, start: Option<&Path>, name: Option<String>) -> Result<()> {
                 Level::Warn,
                 "invalid",
                 "use printable ASCII, at most 64 characters",
-            );
+            )?;
         },
     };
     // First environment: prompt (default `development`), re-asking until it's a valid name.
@@ -75,7 +76,7 @@ pub fn init(ui: &Ui, start: Option<&Path>, name: Option<String>) -> Result<()> {
         if config::is_valid_env_name(&candidate) {
             break candidate;
         }
-        ui.status(Level::Warn, "invalid", "use letters, digits, '-' or '_'");
+        ui.status(Level::Warn, "invalid", "use letters, digits, '-' or '_'")?;
     };
 
     let identity = acquire_identity()?;
@@ -118,38 +119,38 @@ pub fn init(ui: &Ui, start: Option<&Path>, name: Option<String>) -> Result<()> {
     let committed = offer_initial_commit(ui, &project);
 
     // --- summary ---
-    ui.blank();
-    ui.header(&format!("Initialized '{env}' in {}", root.display()));
-    ui.status(Level::Ok, "maintainer", &name);
-    ui.status(Level::Ok, "anchor", &anchor);
+    ui.blank()?;
+    ui.header(&format!("Initialized '{env}' in {}", root.display()))?;
+    ui.status(Level::Ok, "maintainer", &name)?;
+    ui.status(Level::Ok, "anchor", &anchor)?;
     if let Some(words) = wordlist::anchor_words(&anchor) {
-        ui.field("words", &words);
+        ui.field("words", &words)?;
     }
     if imported {
         ui.status(
             Level::Ok,
             "imported",
             &format!("secrets from {}", dotenv_path.display()),
-        );
+        )?;
     }
     if committed {
-        ui.status(Level::Ok, "git", "committed .bitfort");
+        ui.status(Level::Ok, "git", "committed .bitfort")?;
     }
-    ui.blank();
+    ui.blank()?;
     ui.status(
         Level::Warn,
         "solo",
         "one maintainer - a lost key loses the vault; add a second before relying on it",
-    );
-    ui.blank();
-    ui.hint("publish the anchor out-of-band (README/Slack) - the one human trust step");
+    )?;
+    ui.blank()?;
+    ui.hint("publish the anchor out-of-band (README/Slack) - the one human trust step")?;
     if !committed {
-        ui.hint("git add .bitfort && git commit   (pins the anchor in history)");
+        ui.hint("git add .bitfort && git commit   (pins the anchor in history)")?;
     }
     if !imported && dotenv_path.is_file() {
-        ui.hint("import an existing .env:  bitfort import .env");
+        ui.hint("import an existing .env:  bitfort import .env")?;
     }
-    ui.hint("run your app:  bitfort run -- <cmd>");
+    ui.hint("run your app:  bitfort run -- <cmd>")?;
     Ok(())
 }
 
@@ -202,20 +203,20 @@ pub fn keygen(ui: &Ui, name: Option<String>) -> Result<()> {
     } else {
         "using your existing local identity"
     };
-    ui.status(Level::Ok, "identity", status);
-    ui.field("fingerprint", &identity.fingerprint());
-    ui.field("enc key", &identity.enc_pubkey());
-    ui.field("sign key", &identity.sign_pubkey());
-    ui.blank();
+    ui.status(Level::Ok, "identity", status)?;
+    ui.field("fingerprint", &identity.fingerprint())?;
+    ui.field("enc key", &identity.enc_pubkey())?;
+    ui.field("sign key", &identity.sign_pubkey())?;
+    ui.blank()?;
     ui.status(
         Level::Info,
         "invite",
         "send this to a maintainer to be added:",
-    );
+    )?;
     // The blob is printed verbatim (no styling) so it stays copy-pasteable.
-    ui.line(&Invite::from_identity(&identity, name).encode()?);
-    ui.blank();
-    ui.hint("they run:  bitfort member add <invite>");
+    ui.line(&Invite::from_identity(&identity, name).encode()?)?;
+    ui.blank()?;
+    ui.hint("they run:  bitfort member add <invite>")?;
     Ok(())
 }
 
@@ -266,14 +267,14 @@ pub fn identity_new(ui: &Ui, name: Option<String>, force: bool) -> Result<()> {
             (keystore::ENV_ENC): enc.as_str(),
             (keystore::ENV_SIGN): sign.as_str(),
             "invite": invite,
-        }));
+        }))?;
     } else {
         // Printed as `KEY=VALUE` so the pair can be sourced, or split into two CI secrets.
-        ui.line(&format!("{}={}", keystore::ENV_ENC, enc.as_str()));
-        ui.line(&format!("{}={}", keystore::ENV_SIGN, sign.as_str()));
-        ui.line("");
-        ui.line("# Send this invite to a maintainer, who runs: bitfort member add <invite>");
-        ui.line(&format!("# {invite}"));
+        ui.line(&format!("{}={}", keystore::ENV_ENC, enc.as_str()))?;
+        ui.line(&format!("{}={}", keystore::ENV_SIGN, sign.as_str()))?;
+        ui.line("")?;
+        ui.line("# Send this invite to a maintainer, who runs: bitfort member add <invite>")?;
+        ui.line(&format!("# {invite}"))?;
     }
 
     // To stderr, so the operator still sees it when stdout is redirected into a key file,
@@ -297,25 +298,25 @@ pub fn anchor(ui: &Ui, start: Option<&Path>, share: bool) -> Result<()> {
     let words = wordlist::anchor_words(anchor);
 
     if ui.json() {
-        ui.emit_json(&json!({ "anchor": anchor, "anchor_words": words }));
+        ui.emit_json(&json!({ "anchor": anchor, "anchor_words": words }))?;
         return Ok(());
     }
     if share {
         // Plain, no styling even on a TTY, so it copy-pastes into a README/Slack cleanly.
-        println!("BitFort trust anchor - verify this matches on a fresh clone:");
-        println!("  {anchor}");
+        outln!("BitFort trust anchor - verify this matches on a fresh clone:")?;
+        outln!("  {anchor}")?;
         if let Some(w) = &words {
-            println!("  {w}");
+            outln!("  {w}")?;
         }
         return Ok(());
     }
-    ui.header("Trust anchor");
-    ui.field("anchor", anchor);
+    ui.header("Trust anchor")?;
+    ui.field("anchor", anchor)?;
     if let Some(w) = &words {
-        ui.field("words", w);
+        ui.field("words", w)?;
     }
-    ui.blank();
-    ui.hint("publish this out-of-band (README/Slack) so teammates verify it on a fresh clone");
+    ui.blank()?;
+    ui.hint("publish this out-of-band (README/Slack) so teammates verify it on a fresh clone")?;
     Ok(())
 }
 
@@ -377,7 +378,9 @@ pub fn export(
             json
         }
     };
-    print!("{rendered}");
+    std::io::stdout()
+        .write_all(rendered.as_bytes())
+        .context(WRITE_FAILED)?;
     Ok(())
 }
 
@@ -419,20 +422,20 @@ pub fn import(
 
     project.save_vault(env, &vault, &verified.roster, &identity)?;
 
-    println!(
+    outln!(
         "Imported {} secret(s) into '{env}' ({added} added, {updated} updated).",
         added + updated
-    );
+    )?;
     if delete_source {
         std::fs::remove_file(path)
             .with_context(|| format!("imported, but failed to delete {}", path.display()))?;
-        println!("Deleted source file {}.", path.display());
+        outln!("Deleted source file {}.", path.display())?;
     } else {
-        println!(
+        outln!(
             "Source file {} still contains plaintext secrets - delete it once you've",
             path.display()
-        );
-        println!("confirmed the import (or re-run with --delete-source). `.env*` is gitignored.");
+        )?;
+        outln!("confirmed the import (or re-run with --delete-source). `.env*` is gitignored.")?;
     }
     Ok(())
 }
@@ -479,7 +482,7 @@ pub fn set(
             &format!("bitfort set {key}=... --yes"),
         )?
     {
-        ui.line(&ui.dim("aborted."));
+        ui.line(&ui.dim("aborted."))?;
         return Ok(());
     }
 
@@ -492,10 +495,10 @@ pub fn set(
 
     project.save_vault(env, &vault, &verified.roster, &identity)?;
 
-    println!(
+    outln!(
         "{} {key} in '{env}'.",
         if existed { "Updated" } else { "Set" }
-    );
+    )?;
     Ok(())
 }
 
@@ -538,24 +541,24 @@ pub fn verify(ui: &Ui, start: Option<&Path>, env: Option<&str>, strict: bool) ->
             }
         }
         obj["vault"] = vault.json();
-        ui.emit_json(&obj);
+        ui.emit_json(&obj)?;
         return Ok(code);
     }
 
     if !ui.interactive() {
         // Plain machine/CI output (stable strings a pipeline or gate may match).
-        println!("environment:  {env}");
-        println!("trust anchor: {}", config.trust_anchor_fingerprint);
+        outln!("environment:  {env}")?;
+        outln!("trust anchor: {}", config.trust_anchor_fingerprint)?;
         if let Some(words) = wordlist::anchor_words(&config.trust_anchor_fingerprint) {
-            println!("anchor words: {words}");
+            outln!("anchor words: {words}")?;
         }
-        println!("(compare the anchor against the value published out-of-band, e.g. the README)");
+        outln!("(compare the anchor against the value published out-of-band, e.g. the README)")?;
         match &verified {
-            Ok(v) => println!(
+            Ok(v) => outln!(
                 "OK: roster v{} verified, {} member(s).",
                 v.roster.roster_version,
                 v.roster.members.len()
-            ),
+            )?,
             Err(e) => {
                 eprintln!("FAILED: {e}");
                 return Ok(code);
@@ -563,7 +566,7 @@ pub fn verify(ui: &Ui, start: Option<&Path>, env: Option<&str>, strict: bool) ->
         }
         match vault.line() {
             (Level::Fail, why) => eprintln!("FAILED: {why}"),
-            (_, msg) => println!("vault: {msg}"),
+            (_, msg) => outln!("vault: {msg}")?,
         }
         if let Some(why) = guard.and_then(|g| g.warning()) {
             eprintln!("warning: {why}");
@@ -574,12 +577,12 @@ pub fn verify(ui: &Ui, start: Option<&Path>, env: Option<&str>, strict: bool) ->
         return Ok(code);
     }
 
-    ui.header(&format!("bitfort verify · {env}"));
-    ui.field("anchor", &config.trust_anchor_fingerprint);
+    ui.header(&format!("bitfort verify · {env}"))?;
+    ui.field("anchor", &config.trust_anchor_fingerprint)?;
     if let Some(words) = wordlist::anchor_words(&config.trust_anchor_fingerprint) {
-        ui.field("words", &words);
+        ui.field("words", &words)?;
     }
-    ui.hint("compare the anchor with the value published out-of-band (e.g. the README)");
+    ui.hint("compare the anchor with the value published out-of-band (e.g. the README)")?;
     match &verified {
         Ok(v) => ui.status(
             Level::Ok,
@@ -589,24 +592,24 @@ pub fn verify(ui: &Ui, start: Option<&Path>, env: Option<&str>, strict: bool) ->
                 v.roster.roster_version,
                 v.roster.members.len()
             ),
-        ),
+        )?,
         Err(e) => {
-            ui.status(Level::Fail, "roster", &format!("{e}"));
+            ui.status(Level::Fail, "roster", &format!("{e}"))?;
             return Ok(code);
         }
     }
     let (level, msg) = vault.line();
-    ui.status(level, "vault", &msg);
+    ui.status(level, "vault", &msg)?;
     // The chain verified from `chain.json`. Anti-rollback is the one part that still needs
     // git history, so it is the one part that can be unavailable.
     if let Some(why) = guard.and_then(|g| g.warning()) {
-        ui.status(Level::Warn, "rollback", why);
+        ui.status(Level::Warn, "rollback", why)?;
         if strict {
             ui.status(
                 Level::Fail,
                 "strict",
                 "requires git-backed rollback protection",
-            );
+            )?;
         }
     }
     Ok(code)
@@ -625,7 +628,7 @@ pub fn get(start: Option<&Path>, env: Option<&str>, key: &str) -> Result<()> {
         .get(key)
         .ok_or_else(|| anyhow!("no secret named `{key}` in '{env}'"))?;
     eprintln!("warning: exposing the plaintext value of {key}");
-    println!("{value}");
+    outln!("{value}")?;
     Ok(())
 }
 
@@ -648,13 +651,13 @@ pub fn unset(ui: &Ui, start: Option<&Path>, env: Option<&str>, key: &str, yes: b
         yes,
         &format!("bitfort unset {key} --yes"),
     )? {
-        ui.line(&ui.dim("aborted."));
+        ui.line(&ui.dim("aborted."))?;
         return Ok(());
     }
     vault.unset(key);
     project.save_vault(env, &vault, &verified.roster, &identity)?;
 
-    println!("Removed {key} from '{env}'.");
+    outln!("Removed {key} from '{env}'.")?;
     Ok(())
 }
 
@@ -670,23 +673,23 @@ pub fn list(ui: &Ui, start: Option<&Path>, env: Option<&str>) -> Result<()> {
         ui.emit_json(&json!({
             "environment": env,
             "keys": vault.vars().keys().collect::<Vec<_>>(),
-        }));
+        }))?;
         return Ok(());
     }
 
     if !ui.interactive() {
         if vault.vars().is_empty() {
-            println!("No secrets in '{env}'.");
+            outln!("No secrets in '{env}'.")?;
         } else {
             for key in vault.vars().keys() {
-                println!("{key}");
+                outln!("{key}")?;
             }
         }
         return Ok(());
     }
 
     if vault.vars().is_empty() {
-        ui.line(&ui.dim(&format!("No secrets in '{env}'.")));
+        ui.line(&ui.dim(&format!("No secrets in '{env}'.")))?;
         return Ok(());
     }
 
@@ -694,15 +697,15 @@ pub fn list(ui: &Ui, start: Option<&Path>, env: Option<&str>) -> Result<()> {
         "{}   {}",
         ui.bold(&format!("SECRETS · {env}")),
         ui.dim(&format!("{} keys", vault.vars().len()))
-    ));
-    ui.blank();
+    ))?;
+    ui.blank()?;
     let keys: Vec<&String> = vault.vars().keys().collect();
     let colw = keys.iter().map(|k| k.chars().count()).max().unwrap_or(0) + 2;
     let half = keys.len().div_ceil(2);
     for i in 0..half {
         match keys.get(half + i) {
-            Some(right) => ui.line(&format!("  {}{}{right}", keys[i], pad(keys[i], colw))),
-            None => ui.line(&format!("  {}", keys[i])),
+            Some(right) => ui.line(&format!("  {}{}{right}", keys[i], pad(keys[i], colw)))?,
+            None => ui.line(&format!("  {}", keys[i]))?,
         }
     }
     Ok(())
@@ -788,8 +791,8 @@ pub fn env_add(start: Option<&Path>, name: &str) -> Result<()> {
     config.add_env(name)?;
     project.save_config(&config)?;
 
-    println!("Created environment '{name}' with maintainer {holder_name}.");
-    println!("Add members to it with `bitfort member add <invite> --env {name}`.");
+    outln!("Created environment '{name}' with maintainer {holder_name}.")?;
+    outln!("Add members to it with `bitfort member add <invite> --env {name}`.")?;
     Ok(())
 }
 
@@ -817,7 +820,7 @@ pub fn env_list(ui: &Ui, start: Option<&Path>) -> Result<()> {
                 o
             })
             .collect();
-        ui.emit_json(&json!({ "environments": envs }));
+        ui.emit_json(&json!({ "environments": envs }))?;
         return Ok(());
     }
 
@@ -832,20 +835,20 @@ pub fn env_list(ui: &Ui, start: Option<&Path>) -> Result<()> {
                 Ok(v) => format!("verified, {} member(s)", v.roster.members.len()),
                 Err(e) => format!("FAILED: {e}"),
             };
-            println!("{env}{marker}  {status}");
+            outln!("{env}{marker}  {status}")?;
         }
         return Ok(());
     }
 
-    ui.line(&ui.bold("ENVIRONMENTS"));
-    ui.blank();
+    ui.line(&ui.bold("ENVIRONMENTS"))?;
+    ui.blank()?;
     ui.line(&ui.dim(&format!(
         "  {:<nw$} {:<rw$} STATUS",
         "NAME",
         "ROSTER",
         nw = NAME_W,
         rw = ROSTER_W
-    )));
+    )))?;
     for env in &config.environments {
         let default = *env == config.default_env;
         let name_plain = if default {
@@ -871,7 +874,7 @@ pub fn env_list(ui: &Ui, start: Option<&Path>) -> Result<()> {
             pad(&name_plain, NAME_W),
             pad(&roster_col, ROSTER_W),
             ui.mark(level),
-        ));
+        ))?;
     }
     Ok(())
 }
@@ -956,11 +959,11 @@ pub fn member_add(
     reencrypt_to_new_roster(project, env, &identity, &verified, &next)?;
 
     let role = if maintainer { "maintainer" } else { "member" };
-    println!(
+    outln!(
         "Added {name} as {role} to '{env}' (roster v{}).",
         next.roster_version
-    );
-    println!("Commit the change and open a PR so reviewers see the signed roster bump.");
+    )?;
+    outln!("Commit the change and open a PR so reviewers see the signed roster bump.")?;
     Ok(())
 }
 
@@ -1021,7 +1024,7 @@ pub fn member_rm(
         yes,
         &try_cmd,
     )? {
-        ui.line(&ui.dim("aborted."));
+        ui.line(&ui.dim("aborted."))?;
         return Ok(());
     }
 
@@ -1034,14 +1037,14 @@ pub fn member_rm(
 
     reencrypt_to_new_roster(project, env, &identity, &verified, &next)?;
 
-    println!(
+    outln!(
         "Removed {shown} from '{env}' (roster v{}).",
         next.roster_version
-    );
-    println!(
+    )?;
+    outln!(
         "The vault is re-encrypted without their key, but they may retain previously seen \
          values - run `bitfort rotate` and change any secrets you consider compromised."
-    );
+    )?;
     Ok(())
 }
 
@@ -1087,7 +1090,7 @@ pub fn member_list(ui: &Ui, start: Option<&Path>, env: Option<&str>) -> Result<(
             .collect();
         let mut obj = json!({ "environment": env, "members": members });
         merge_roster_json(&mut obj, verified.as_ref());
-        ui.emit_json(&obj);
+        ui.emit_json(&obj)?;
         return Ok(());
     }
 
@@ -1102,7 +1105,7 @@ pub fn member_list(ui: &Ui, start: Option<&Path>, env: Option<&str>) -> Result<(
                 bitfort_core::fingerprint_of(&m.enc_pubkey),
                 format!("{:?}", m.role).to_lowercase(),
                 bitfort_core::roster::display_name(&m.name)
-            ));
+            ))?;
         }
         return Ok(());
     }
@@ -1123,15 +1126,15 @@ pub fn member_list(ui: &Ui, start: Option<&Path>, env: Option<&str>) -> Result<(
     ui.line(&format!(
         "{}   {status}",
         ui.bold(&format!("ROSTER · {env}"))
-    ));
-    ui.blank();
+    ))?;
+    ui.blank()?;
     ui.line(&ui.dim(&format!(
         "  {:<nw$} {:<rw$} KEY FINGERPRINT",
         "NAME",
         "ROLE",
         nw = NAME_W,
         rw = ROLE_W
-    )));
+    )))?;
 
     // Mark the local identity, when one is available, without failing the listing if not.
     let me = keystore::load_identity().ok().map(|id| id.sign_pubkey());
@@ -1160,7 +1163,7 @@ pub fn member_list(ui: &Ui, start: Option<&Path>, env: Option<&str>) -> Result<(
             "  {name}{} {role}{} {fp}",
             pad(&name_plain, NAME_W),
             pad(&role_str, ROLE_W)
-        ));
+        ))?;
     }
     Ok(())
 }
@@ -1188,14 +1191,14 @@ pub fn rotate(start: Option<&Path>, env: Option<&str>) -> Result<()> {
     config.rotated_at = Some(clock::now_rfc3339());
     project.save_config(&config)?;
 
-    println!(
+    outln!(
         "Re-encrypted '{env}' vault to the current roster ({} member(s)).",
         verified.roster.members.len()
-    );
-    println!(
+    )?;
+    outln!(
         "This refreshes the ciphertext only. To invalidate values a departed member saw, \
          change the real credentials at their source and `bitfort set` the new values."
-    );
+    )?;
     Ok(())
 }
 
@@ -1242,10 +1245,10 @@ pub fn resolve(start: Option<&Path>, env: Option<&str>, side: Option<Side>) -> R
     // the first one, silently. The merged file has no markers, and that is the difference: it
     // means this conflict has already been settled in the working tree.
     if !project.vault_has_conflict_markers(env)? {
-        println!(
+        outln!(
             "The '{env}' vault has already been resolved; leaving it alone.\nStage it to clear \
              the merge."
-        );
+        )?;
         return Ok(());
     }
 
@@ -1291,13 +1294,12 @@ pub fn resolve(start: Option<&Path>, env: Option<&str>, side: Option<Side>) -> R
     warn_oversized(&vault);
     project.save_vault(env, &vault, &verified.roster, &identity)?;
 
-    println!(
+    outln!(
         "Resolved '{env}' vault: {} secret(s), {} conflict(s) settled.",
         vault.vars().len(),
         outcome.conflicts.len()
-    );
-    report_merge_effect(&ours, &vault);
-    Ok(())
+    )?;
+    report_merge_effect(&ours, &vault)
 }
 
 /// Name every secret the merge added to our side, and every one it took away.
@@ -1310,7 +1312,7 @@ pub fn resolve(start: Option<&Path>, env: Option<&str>, side: Option<Side>) -> R
 /// is say which names changed hands, so the user who withdrew one sees it come back.
 ///
 /// Names only. Counts alone read as success, and values would put plaintext on the terminal.
-fn report_merge_effect(ours: &Vault, merged: &Vault) {
+fn report_merge_effect(ours: &Vault, merged: &Vault) -> Result<()> {
     let names = |from: &Vault, missing_in: &Vault| -> Vec<String> {
         from.vars()
             .keys()
@@ -1323,9 +1325,10 @@ fn report_merge_effect(ours: &Vault, merged: &Vault) {
         ("removed", names(ours, merged)),
     ] {
         if !keys.is_empty() {
-            println!("  {label}: {}", keys.join(", "));
+            outln!("  {label}: {}", keys.join(", "))?;
         }
     }
+    Ok(())
 }
 
 /// `bitfort status`: a one-screen readout of the environment's security posture -
@@ -1384,14 +1387,14 @@ pub fn status(ui: &Ui, start: Option<&Path>, env: Option<&str>) -> Result<()> {
             },
             "dotenv_gitignored": gitignored,
             "next_step": next_step,
-        }));
+        }))?;
         return Ok(());
     }
 
-    ui.header(&format!("BitFort · {env}"));
-    ui.field("anchor", &config.trust_anchor_fingerprint);
+    ui.header(&format!("BitFort · {env}"))?;
+    ui.field("anchor", &config.trust_anchor_fingerprint)?;
     if let Some(words) = wordlist::anchor_words(&config.trust_anchor_fingerprint) {
-        ui.field("words", &words);
+        ui.field("words", &words)?;
     }
     match &roster {
         Ok(v) => ui.status(
@@ -1402,26 +1405,26 @@ pub fn status(ui: &Ui, start: Option<&Path>, env: Option<&str>) -> Result<()> {
                 v.roster.roster_version,
                 v.roster.members.len()
             ),
-        ),
-        Err(e) => ui.status(Level::Fail, "roster", &format!("unverified: {e}")),
+        )?,
+        Err(e) => ui.status(Level::Fail, "roster", &format!("unverified: {e}"))?,
     }
     let (vault_level, vault_msg) = vault_state.line();
-    ui.status(vault_level, "vault", &vault_msg);
+    ui.status(vault_level, "vault", &vault_msg)?;
     let (rollback_level, rollback_msg) = match rollback_warning {
         Some(why) => (Level::Warn, why),
         None if roster.is_err() => (Level::Info, "not checked - the roster does not verify"),
         None => (Level::Ok, "enforced against committed history"),
     };
-    ui.status(rollback_level, "rollback", rollback_msg);
+    ui.status(rollback_level, "rollback", rollback_msg)?;
     let (env_level, env_msg) = if gitignored {
         (Level::Ok, "gitignored")
     } else {
         (Level::Warn, "not gitignored")
     };
-    ui.status(env_level, ".env", env_msg);
+    ui.status(env_level, ".env", env_msg)?;
 
-    ui.blank();
-    ui.hint(next_step);
+    ui.blank()?;
+    ui.hint(next_step)?;
     Ok(())
 }
 
@@ -1831,7 +1834,7 @@ fn check_drift(vault: &Vault, roster: &Roster, env: &str, intent: Use) -> Result
 /// whoever wrote them, so the only honest answer is to refuse and name the way back.
 fn no_conflict_to_resolve(project: &bitfort_core::Project, env: &str) -> Result<()> {
     if !project.vault_has_conflict_markers(env)? {
-        println!("No merge conflict in the '{env}' vault; nothing to resolve.");
+        outln!("No merge conflict in the '{env}' vault; nothing to resolve.")?;
         return Ok(());
     }
     // Outside a repository there is no index to restore a merge from, so `git checkout

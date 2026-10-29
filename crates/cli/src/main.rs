@@ -2,6 +2,10 @@
 //! `bitfort run`, in CI, in shell chains), so it must not pull in any GUI or
 //! webview dependency. The full command surface is specified in docs/SPEC.md §6.
 
+// `println!` panics when stdout cannot be written. Output goes through `outln!` or `Ui`, which
+// return that failure as an error instead.
+#![deny(clippy::print_stdout)]
+
 mod commands;
 mod heap;
 mod run;

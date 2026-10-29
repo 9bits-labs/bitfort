@@ -739,37 +739,27 @@ signing identity before the first public release and keep it constant across ver
 
 ---
 
-## 9. Binaries and desktop UI
+## 9. Binaries
 
-### 9.1 Two binaries over one core
+### 9.1 One binary over one core
 
-The workspace ships **two** executables over a single `bitfort-core` crate (no duplicated logic):
+The workspace ships one executable over a single `bitfort-core` crate (no duplicated logic):
 
 - **`bitfort` (CLI)** - thin `clap` binary. **No Tauri, no webview dependency.** This is the
   hot-path artifact: invoked on every `bitfort run`, in CI, in shell chains. It must load and run
   in bare/headless environments.
-- **`bitfort-desktop`** - Tauri GUI for the maintainer/editing flow.
 
-Why not a single Tauri binary with `tauri-plugin-cli`? You *can* branch on args before
-`tauri::Builder::run()` so the event loop never starts - that solves the runtime cost. But on
-**Linux the executable dynamically links `webkit2gtk`/gtk**, resolved by the loader at startup,
-before `main()` runs. A single binary therefore fails to load on a minimal CI container or
-headless server lacking those libs - exactly where `bitfort run` must work. The separate CLI
-binary avoids the GUI link-time dependency for the cost of a second `[[bin]]`. (macOS/Windows
-ship the webview with the OS, so this only bites on Linux - but Linux/CI is a target.)
+The CLI and the core link no GUI crate. On **Linux an executable that links a webview dynamically
+links `webkit2gtk`/gtk**, resolved by the loader at startup, before `main()` runs. Such a binary
+fails to load on a minimal CI container or headless server that lacks those libraries, which is
+where `bitfort run` must work. A GUI, if one is ever built, is therefore a separate binary over
+the same core, never a mode of the CLI. (macOS and Windows ship the webview with the OS, so this
+matters only on Linux, and Linux/CI is a target.)
 
-### 9.2 Desktop scope (minimal, v1)
+### 9.2 Desktop app
 
-Thin shell over the same Rust core - no duplicated crypto. Stack: **Tauri** (Rust backend =
-reuse the core crate; web frontend). Scope for v1:
-
-- Open a project (`.bitfort/` dir), show roster + verification status.
-- View secret **keys**; add/update/remove a value (calls core `set`/`unset` -> re-encrypt).
-- Maintainer flow: review a pending invite, `member add`, see the signed roster bump.
-
-Explicitly out of scope for v1 desktop: running commands, editing raw JSON, multi-project
-dashboards. The CLI remains the source of truth; the UI is a convenience over identical core
-functions.
+Out of scope. No desktop app is planned, and nothing in this workspace builds one. Revisit it only
+on clear demand. The CLI is the only front end.
 
 ---
 
@@ -786,7 +776,7 @@ Verify latest compatible versions at implementation time (do not pin from memory
 
 | Concern | Choice |
 |---|---|
-| Language | Rust (workspace: `bitfort-core` lib, `bitfort-cli` bin = **no webview dep**, `bitfort-desktop` Tauri app; see §9.1) |
+| Language | Rust (workspace: `bitfort-core` lib, `bitfort-cli` bin = **no webview dep**; see §9.1) |
 | Encryption | `age` (X25519 recipients + ChaCha20-Poly1305), **ASCII-armored** output (§4.4) |
 | Signing | Ed25519 (`ed25519-dalek`) for the roster and the vault payload |
 | Canonical signing bytes | RFC 8785 JCS (e.g. `serde_jcs`), domain-separated (§4.3) - not ad-hoc key sorting |
@@ -797,7 +787,6 @@ Verify latest compatible versions at implementation time (do not pin from memory
 | Serialization | `serde` + `serde_json` + `toml` (signing uses the JCS path above, not `serde_json` default output) |
 | Errors | `anyhow` (bins) / `thiserror` (core lib) |
 | Signals (Unix) | `nix` or `signal-hook` |
-| Desktop | `tauri` |
 | Tests | `cargo test`, `assert_cmd` + `tempfile` for CLI e2e, `insta` for format snapshots |
 
 ---

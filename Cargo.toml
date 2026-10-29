@@ -2,8 +2,7 @@
 resolver = "2"
 members = ["crates/core", "crates/cli"]
 
-# crates/desktop (Tauri, docs/SPEC.md §9) is intentionally not a member, to keep the CLI
-# build free of GUI deps.
+# No GUI crate is a member: the CLI build stays free of GUI deps (docs/SPEC.md §9).
 
 [workspace.package]
 version = "0.1.0"

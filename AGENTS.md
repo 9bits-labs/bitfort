@@ -16,7 +16,8 @@ Rust workspace; crate folders under `crates/` are not prefixed with `bitfort`.
 |---|---|---|
 | `crates/core` | `bitfort-core` | Crypto, roster, vault engine. **No GUI/webview dependency, ever.** |
 | `crates/cli` | `bitfort-cli` (binary `bitfort`) | Hot-path CLI. Links only `bitfort-core`. Must run on bare Linux/CI. |
-| `crates/desktop` | `bitfort-desktop` (Tauri) | Not scaffolded or a workspace member yet. |
+
+A desktop app is out of scope (`docs/SPEC.md` §9.2); do not scaffold one.
 
 ## Verification loop (run after every significant change)
 

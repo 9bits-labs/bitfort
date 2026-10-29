@@ -1,7 +1,7 @@
 //! The on-disk `.bitfort/` project: discovery, layout, and the load/save/verify
 //! orchestration shared by every front end (docs/SPEC.md §4). This is where the
-//! "verify the signed roster before re-encrypting" invariant lives, so the CLI and
-//! (later) the desktop app cannot each re-derive it differently.
+//! "verify the signed roster before re-encrypting" invariant lives, so no front end
+//! can re-derive it differently.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

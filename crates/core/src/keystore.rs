@@ -5,6 +5,7 @@
 //!
 //! Resolution order: env vars, then env-named file, then keyring.
 
+use std::ffi::OsString;
 use std::path::Path;
 
 use zeroize::Zeroizing;
@@ -28,11 +29,11 @@ const IDENTITY_ACCOUNT: &str = "identity";
 /// Like [`load_identity`], but distinguishes "no identity is configured anywhere"
 /// (`Ok(None)`) from a real failure (`Err`). Used by `init`/`keygen`, which generate a
 /// fresh identity only when none exists. A misconfigured env source (e.g. `BITFORT_IDENTITY`
-/// set but malformed, or `BITFORT_SIGN_IDENTITY` missing) is a hard error, not "none" -
+/// set but malformed, or one of the pair set without the other) is a hard error, not "none" -
 /// otherwise a typo would silently mint a second identity instead of surfacing the mistake.
 pub fn find_identity() -> Result<Option<Identity>> {
-    if std::env::var_os(ENV_ENC).is_some() || std::env::var_os(ENV_FILE).is_some() {
-        return load_identity().map(Some);
+    if let Some(identity) = identity_from_env(|var| std::env::var_os(var))? {
+        return Ok(Some(identity));
     }
     match keyring_get_opt(IDENTITY_ACCOUNT)? {
         None => Ok(None),
@@ -43,27 +44,46 @@ pub fn find_identity() -> Result<Option<Identity>> {
 
 /// Load the local identity, trying each source in precedence order.
 pub fn load_identity() -> Result<Identity> {
+    match identity_from_env(|var| std::env::var_os(var))? {
+        Some(identity) => Ok(identity),
+        None => load_from_keyring(),
+    }
+}
+
+/// The env sources, in precedence order: the variable pair, then the file named by
+/// [`ENV_FILE`]. `None` means neither is configured and the caller goes on to the keyring.
+/// [`find_identity`] and [`load_identity`] both resolve through here, so they cannot disagree
+/// on what counts as configured.
+///
+/// Half a pair is an error, whichever half it is, and it is raised before the file is read, so
+/// the stray half is never ignored in favor of another source.
+///
+/// `var` reads one variable: `std::env::var_os` in use, a fixed list in the tests, so the
+/// rules are tested without changing the process environment and without the keyring.
+fn identity_from_env(var: impl Fn(&str) -> Option<OsString>) -> Result<Option<Identity>> {
     // `var_os` so a present-but-non-UTF-8 value is a clear error instead of silently
     // falling through to a different source (security review #3).
-    if let Some(raw_enc) = std::env::var_os(ENV_ENC) {
-        let enc = Zeroizing::new(
-            raw_enc
-                .into_string()
-                .map_err(|_| Error::InvalidKey(format!("{ENV_ENC} is set but not valid UTF-8")))?,
-        );
-        let raw_sign = std::env::var_os(ENV_SIGN).ok_or_else(|| {
-            Error::InvalidKey(format!("{ENV_SIGN} must be set when {ENV_ENC} is set"))
-        })?;
-        let sign =
-            Zeroizing::new(raw_sign.into_string().map_err(|_| {
-                Error::InvalidKey(format!("{ENV_SIGN} is set but not valid UTF-8"))
-            })?);
-        return Identity::from_secret_strings(&enc, &sign);
+    let secret = |raw: OsString, var: &str| {
+        raw.into_string()
+            .map(Zeroizing::new)
+            .map_err(|_| Error::InvalidKey(format!("{var} is set but not valid UTF-8")))
+    };
+    match (var(ENV_ENC), var(ENV_SIGN)) {
+        (Some(enc), Some(sign)) => {
+            let (enc, sign) = (secret(enc, ENV_ENC)?, secret(sign, ENV_SIGN)?);
+            Identity::from_secret_strings(&enc, &sign).map(Some)
+        }
+        (Some(_), None) => Err(Error::InvalidKey(format!(
+            "{ENV_SIGN} must be set when {ENV_ENC} is set"
+        ))),
+        (None, Some(_)) => Err(Error::InvalidKey(format!(
+            "{ENV_ENC} must be set when {ENV_SIGN} is set"
+        ))),
+        (None, None) => match var(ENV_FILE) {
+            Some(path) => load_identity_file(Path::new(&path)).map(Some),
+            None => Ok(None),
+        },
     }
-    if let Some(path) = std::env::var_os(ENV_FILE) {
-        return load_identity_file(Path::new(&path));
-    }
-    load_from_keyring()
 }
 
 /// Load an identity from a `BITFORT_IDENTITY_FILE`-style file.
@@ -204,6 +224,44 @@ mod tests {
         let id = Identity::generate().unwrap();
         let contents = format!("{ENV_ENC}={}\n", id.enc_secret().as_str());
         assert!(parse_identity_file(&contents).is_err());
+    }
+
+    /// The lookup the tests hand to [`identity_from_env`]: `vars` and nothing else.
+    fn lookup<'a>(vars: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
+        move |var| {
+            vars.iter()
+                .find(|(name, _)| *name == var)
+                .map(|(_, value)| value.into())
+        }
+    }
+
+    /// Half a pair is refused whichever half it is, and before the file is read: the file
+    /// here does not exist, so a read would fail with another error. `Ok(None)` would send
+    /// the caller to the keyring, which this test never reaches, as an e2e run would.
+    #[test]
+    fn half_a_pair_is_refused_before_the_file() {
+        let id = Identity::generate().unwrap();
+        let (enc, sign) = (id.enc_secret(), id.sign_secret());
+        let file = (ENV_FILE, "/nonexistent/bitfort/id");
+        for (vars, missing) in [
+            (&[(ENV_ENC, enc.as_str())][..], ENV_SIGN),
+            (&[(ENV_SIGN, sign.as_str())], ENV_ENC),
+            (&[(ENV_ENC, enc.as_str()), file], ENV_SIGN),
+            (&[(ENV_SIGN, sign.as_str()), file], ENV_ENC),
+        ] {
+            let err = identity_from_env(lookup(vars)).err().unwrap().to_string();
+            assert!(err.contains(&format!("{missing} must be set")), "{err}");
+        }
+    }
+
+    #[test]
+    fn the_pair_resolves_and_no_source_is_none() {
+        let id = Identity::generate().unwrap();
+        let (enc, sign) = (id.enc_secret(), id.sign_secret());
+        let vars = [(ENV_ENC, enc.as_str()), (ENV_SIGN, sign.as_str())];
+        let found = identity_from_env(lookup(&vars)).unwrap().unwrap();
+        assert_eq!(found.anchor(), id.anchor());
+        assert!(identity_from_env(lookup(&[])).unwrap().is_none());
     }
 
     #[test]

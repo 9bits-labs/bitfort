@@ -383,3 +383,45 @@ fn a_failed_write_to_stdout_exits_nonzero() {
         );
     }
 }
+
+/// `BITFORT_SIGN_IDENTITY` without `BITFORT_IDENTITY` is half an env source. It used to count
+/// as no env source at all, so the command took the keyring identity instead: on a developer
+/// machine it ran as the developer, on a runner it failed with a keyring error. An identity
+/// file does not complete the pair either, because the stray half would be ignored.
+///
+/// Only `get` runs here. If the check regressed, `keygen` would go on to the keyring and store
+/// a new key in the developer's own; `get` would only read it. `find_identity`, which `keygen`
+/// uses, shares this check, and the keystore unit tests cover it without the keyring.
+#[test]
+fn a_lone_signing_identity_is_refused_before_the_keyring() {
+    let f = init_project();
+    let key_file = f.dir.path().join("ci.key");
+    std::fs::write(
+        &key_file,
+        format!(
+            "BITFORT_IDENTITY={}\nBITFORT_SIGN_IDENTITY={}\n",
+            f.id.enc_secret().as_str(),
+            f.id.sign_secret().as_str()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    for file in [None, Some(&key_file)] {
+        let mut cmd = bf(f.dir.path(), &f.id);
+        cmd.env_remove("BITFORT_IDENTITY");
+        if let Some(file) = file {
+            cmd.env("BITFORT_IDENTITY_FILE", file);
+        }
+        cmd.args(["get", "API_KEY"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "BITFORT_IDENTITY must be set when BITFORT_SIGN_IDENTITY is set",
+            ));
+    }
+}

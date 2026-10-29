@@ -103,8 +103,9 @@ Private keys are loaded from one of two sources, resolved in this order:
 
 Notes:
 - A CI runner is supplied **both** halves of the identity. `BITFORT_IDENTITY` and
-  `BITFORT_SIGN_IDENTITY` are required together: `keystore::load_identity` errors when only the
-  first is set. The runner still must not mutate the roster; that is enforced by giving it a
+  `BITFORT_SIGN_IDENTITY` are required together: `keystore::load_identity` errors when either is
+  set without the other, and neither half falls through to the identity file or the keyring.
+  The runner still must not mutate the roster; that is enforced by giving it a
   plain member seat, not by withholding the signing key.
 - The CI identity is a normal roster **member** with its own keypair - added via `member add`
   like any teammate, then its private key placed in the CI platform's secret store. It is not a

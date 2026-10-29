@@ -27,12 +27,7 @@ pub fn parse(input: &str) -> Result<Vec<(String, String)>> {
         // front of `=` writes key material into the terminal, CI logs, and `--json` output.
         // The line number says where to look; the file is on the user's own disk.
         let Some((key, value)) = line.split_once('=') else {
-            return Err(Error::Config(format!(
-                "line {}: expected KEY=VALUE (the line is withheld: it may be secret \
-                 material). Multi-line values are not supported here - add them with \
-                 `bitfort set`.",
-                i + 1
-            )));
+            return Err(Error::NotAnAssignment(i + 1));
         };
         let key = key.trim();
         if !is_valid_key(key) {

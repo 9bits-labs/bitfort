@@ -75,6 +75,12 @@ pub enum Error {
     #[error("config error: {0}")]
     Config(String),
 
+    /// A dotenv line, at this 1-based number, has no `=`. Kept apart from [`Error::Config`]
+    /// because it is the line a multi-line value leaves behind, so `import` can name the fix
+    /// for that case alone. The line itself is withheld: it may be secret material.
+    #[error("line {0}: expected KEY=VALUE (the line is withheld: it may be secret material)")]
+    NotAnAssignment(usize),
+
     /// An on-disk payload's format version is newer than this build understands.
     #[error(
         "unsupported {0} schema v{1}: this bitfort reads up to v{2}. Upgrade bitfort to open this project."

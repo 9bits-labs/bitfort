@@ -10,6 +10,7 @@ use std::path::Path;
 
 use zeroize::Zeroizing;
 
+use crate::dotenv;
 use crate::error::{Error, Result};
 use crate::identity::Identity;
 
@@ -103,34 +104,30 @@ pub fn load_identity_file(path: &Path) -> Result<Identity> {
         }
     }
     let contents = Zeroizing::new(std::fs::read_to_string(path)?);
-    let (enc, sign) = parse_identity_file(&contents)?;
+    let (enc, sign) = parse_identity_file(&contents, &format!("identity file {}", path.display()))?;
     Identity::from_secret_strings(&enc, &sign)
 }
 
-/// Parse the two key variables out of a dotenv-style identity file. Blank lines and
-/// `#` comments are ignored; unknown keys are skipped.
-fn parse_identity_file(contents: &str) -> Result<(Zeroizing<String>, Zeroizing<String>)> {
+/// Parse the two key variables out of a dotenv-style identity file, with the parser `import`
+/// uses, so a file a shell can source (`export` prefixes, single quotes) reads the same here.
+/// Unknown keys are skipped. `origin` names the text's source in an error, because a parse
+/// error alone gives only a line number.
+fn parse_identity_file(
+    contents: &str,
+    origin: &str,
+) -> Result<(Zeroizing<String>, Zeroizing<String>)> {
     let mut enc = None;
     let mut sign = None;
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let value = value.trim().trim_matches('"');
-        match key.trim() {
-            ENV_ENC => enc = Some(Zeroizing::new(value.to_string())),
-            ENV_SIGN => sign = Some(Zeroizing::new(value.to_string())),
+    let pairs = dotenv::parse(contents).map_err(|e| Error::InvalidKey(format!("{origin}: {e}")))?;
+    for (key, value) in pairs {
+        match key.as_str() {
+            ENV_ENC => enc = Some(Zeroizing::new(value)),
+            ENV_SIGN => sign = Some(Zeroizing::new(value)),
             _ => {}
         }
     }
-    let enc =
-        enc.ok_or_else(|| Error::InvalidKey(format!("{ENV_ENC} missing in identity file")))?;
-    let sign =
-        sign.ok_or_else(|| Error::InvalidKey(format!("{ENV_SIGN} missing in identity file")))?;
+    let enc = enc.ok_or_else(|| Error::InvalidKey(format!("{ENV_ENC} missing in {origin}")))?;
+    let sign = sign.ok_or_else(|| Error::InvalidKey(format!("{ENV_SIGN} missing in {origin}")))?;
     Ok((enc, sign))
 }
 
@@ -150,7 +147,7 @@ fn load_from_keyring() -> Result<Identity> {
 /// Rebuild an identity from a stored blob, reusing the identity-file parser so the
 /// serialization format lives in exactly one place.
 fn build_identity(blob: &str) -> Result<Identity> {
-    let (enc, sign) = parse_identity_file(blob)?;
+    let (enc, sign) = parse_identity_file(blob, "the keyring entry")?;
     Identity::from_secret_strings(&enc, &sign)
 }
 
@@ -214,7 +211,23 @@ mod tests {
             id.enc_secret().as_str(),
             id.sign_secret().as_str(),
         );
-        let (enc, sign) = parse_identity_file(&contents).unwrap();
+        let (enc, sign) = parse_identity_file(&contents, "identity file").unwrap();
+        assert_eq!(enc.as_str(), id.enc_secret().as_str());
+        assert_eq!(sign.as_str(), id.sign_secret().as_str());
+    }
+
+    /// A file a shell can source parses to the same values: an `export` prefix and a
+    /// single-quoted value used to fail, the first as a missing key and the second as a key
+    /// with the quotes still on it.
+    #[test]
+    fn parses_an_identity_file_in_shell_syntax() {
+        let id = Identity::generate().unwrap();
+        let contents = format!(
+            "export {ENV_ENC}={}\n{ENV_SIGN}='{}'\n",
+            id.enc_secret().as_str(),
+            id.sign_secret().as_str(),
+        );
+        let (enc, sign) = parse_identity_file(&contents, "identity file").unwrap();
         assert_eq!(enc.as_str(), id.enc_secret().as_str());
         assert_eq!(sign.as_str(), id.sign_secret().as_str());
     }
@@ -223,7 +236,20 @@ mod tests {
     fn identity_file_missing_sign_is_rejected() {
         let id = Identity::generate().unwrap();
         let contents = format!("{ENV_ENC}={}\n", id.enc_secret().as_str());
-        assert!(parse_identity_file(&contents).is_err());
+        assert!(parse_identity_file(&contents, "identity file").is_err());
+    }
+
+    /// A bad line names the file and the line. The parser's own error gives only the line,
+    /// and the variable that named the file is not in the message. `import`'s advice to add a
+    /// value with `bitfort set` is no fix for an identity file, so it is absent.
+    #[test]
+    fn a_bad_line_in_an_identity_file_names_the_file_and_the_line() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write!(file, "BITFORT_IDENTITY=x\n[ci]\n").unwrap();
+        let err = load_identity_file(file.path()).err().unwrap().to_string();
+        assert!(err.contains(&file.path().display().to_string()), "{err}");
+        assert!(err.contains("line 2"), "{err}");
+        assert!(!err.contains("bitfort set"), "{err}");
     }
 
     /// The lookup the tests hand to [`identity_from_env`]: `vars` and nothing else.

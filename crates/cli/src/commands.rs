@@ -404,7 +404,15 @@ pub fn import(
 
     let contents =
         std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
-    let pairs = dotenv::parse(&contents)?;
+    // The advice is added here, not in the parser: an identity file goes through the same
+    // parser, and `bitfort set` is no fix for one. It fits only a line with no `=`, the
+    // shape a multi-line value's later lines take.
+    let pairs = dotenv::parse(&contents).map_err(|e| match e {
+        bitfort_core::Error::NotAnAssignment(_) => {
+            anyhow!("{e}. Multi-line values are not supported here - add them with `bitfort set`.")
+        }
+        e => e.into(),
+    })?;
     if pairs.is_empty() {
         bail!("{} contained no assignments", path.display());
     }

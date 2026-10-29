@@ -205,8 +205,28 @@ fn import_does_not_echo_the_line_it_could_not_parse() {
             .assert()
             .failure()
             .stderr(predicate::str::contains("MIIEow").not())
-            .stdout(predicate::str::contains("MIIEow").not());
+            .stdout(predicate::str::contains("MIIEow").not())
+            // The way out stays: `import` adds it, since the shared parser cannot.
+            .stderr(predicate::str::contains("add them with `bitfort set`"));
     }
+}
+
+/// The multi-line advice fits only a line with no `=`. A line with a bad name is a typo in
+/// the name, and `bitfort set` refuses that name too.
+#[test]
+fn import_gives_the_multi_line_advice_only_for_a_line_with_no_assignment() {
+    let f = init_project();
+    let dotenv = f.dir.path().join(".env");
+    fs::write(&dotenv, "my-key=abc\n").unwrap();
+
+    bf(f.dir.path(), &f.id)
+        .args(["import", ".env"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "not a valid environment variable name",
+        ))
+        .stderr(predicate::str::contains("bitfort set").not());
 }
 
 /// A vault holding two process-control names must still be repairable.

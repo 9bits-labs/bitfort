@@ -1,4 +1,4 @@
-//! End-to-end tests for the M3 team surface: environments (`env add/list`) and members
+//! End-to-end tests for the team surface: environments (`env add/list`) and members
 //! (`member add/rm/list`), including the rogue-roster, downgrade, and cross-environment
 //! isolation cases. Driven through the real binary with `assert_cmd`.
 

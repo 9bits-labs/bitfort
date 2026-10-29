@@ -1,6 +1,6 @@
 //! The copy/paste invite blob a new developer produces with `keygen` and hands to a
 //! maintainer (docs/SPEC.md §5.2). It carries only public key material, so it is safe
-//! to send over Slack/email. `member add` (M3) decodes it; M2 only produces it.
+//! to send over Slack/email. `member add` decodes it.
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};

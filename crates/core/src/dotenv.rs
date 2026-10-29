@@ -1,4 +1,4 @@
-//! A small `.env` parser for the `import` on-ramp (docs/SPEC.md §6, M2). Supports the
+//! A small `.env` parser for the `import` on-ramp (docs/SPEC.md §6). Supports the
 //! common dotenv shape - `KEY=VALUE`, optional `export ` prefix, `#` comments, blank
 //! lines, and single/double-quoted values - which is enough to migrate a typical
 //! project's `.env`. A value is one physical line: a double-quoted one may carry `\n` and

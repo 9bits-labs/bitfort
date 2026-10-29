@@ -628,9 +628,14 @@ The corrected engine. Requirements the original snippet missed:
 - **No stdio interception.** Inherit stdin/stdout/stderr directly.
 - **Zeroize the parent's plaintext buffers** after spawn using `zeroize`, on the error paths as
   well as the success path. `Vault::decrypt`'s plaintext buffer and `Vault::encrypt`'s JCS buffer
-  are zeroized on drop for the same reason, and `Vault`'s `Debug` prints names only. None of this
-  protects the child (documented non-goal); it keeps plaintext out of the BitFort process's freed
-  memory and out of anything that logs.
+  are zeroized on drop for the same reason, and `Vault`'s `Debug` prints names only. Beneath
+  that, the `bitfort` binary's global allocator wipes every heap block before it frees it. That
+  reaches the copies `zeroize` cannot: those that dependencies make and free themselves
+  (`serde_jcs` buffers each value while it sorts the keys it signs, `std::process::Command` keeps
+  its own copy of the child's environment), and the old block a reallocation leaves when it
+  moves. `scripts/check-heap-wipe.sh` checks this against the real binary on macOS. None of this
+  protects the child (documented non-goal); it keeps plaintext out of the
+  BitFort process's freed memory and out of anything that logs.
 
 Reference shape (illustrative, not final):
 ```rust

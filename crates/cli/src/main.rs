@@ -3,6 +3,7 @@
 //! webview dependency. The full command surface is specified in docs/SPEC.md §6.
 
 mod commands;
+mod heap;
 mod run;
 mod ui;
 
@@ -13,6 +14,11 @@ use std::process::ExitCode;
 use anyhow::Context;
 use clap::builder::styling::{AnsiColor, Style, Styles};
 use clap::{CommandFactory, Parser, Subcommand};
+
+/// Every heap block is wiped before it is freed, which reaches the copies `Zeroizing` cannot
+/// (invariant 6). See [`heap`].
+#[global_allocator]
+static ALLOC: heap::WipeOnFree<std::alloc::System> = heap::WipeOnFree(std::alloc::System);
 
 /// clap help styling coordinated with the wordmark: section headers and usage in the same
 /// cyan as the banner, and command/flag names (literals) in cyan too, so `bitfort --help`

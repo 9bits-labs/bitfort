@@ -20,8 +20,9 @@ use bitfort_core::{keystore, Vault};
 ///
 /// The vault has already been screened by [`crate::commands::refuse_process_control_vars`],
 /// which every command that turns vault contents into an environment shares. It is taken by
-/// value: this is the sole owner of the plaintext, and a [`Vault`] wipes its values when it
-/// drops, on every path out of here, error paths included (invariant 6).
+/// value, so no caller keeps a copy, and a [`Vault`] wipes its values when it drops, on every
+/// path out of here, error paths included (invariant 6). The copies `Command` makes for the
+/// child are freed when `spawn` returns, and the allocator in `main.rs` wipes them.
 pub fn exec(vault: Vault, clean: bool, command: &[String]) -> Result<i32> {
     // Opened before anything is spawned. Handlers used to be installed after `spawn`
     // returned, leaving a window - measured at 16 to 54 us - in which a SIGTERM took

@@ -139,9 +139,28 @@ impl std::fmt::Debug for Vault {
 /// A vault's secrets, with each value wiped when the map drops (invariant 6). The wipe lives
 /// on the map, not on [`Vault`], so it also covers a payload that `decrypt` refuses, a map
 /// that `with_vars` refuses, and every clone. Serialized as the bare map.
+///
+/// There is no `DerefMut`, so a change goes through [`Secrets::insert`] or [`Secrets::remove`],
+/// which wipe the value they displace. Reach into `.0` only in these methods and in `Drop`.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 struct Secrets(BTreeMap<String, String>);
+
+impl Secrets {
+    /// Insert `value` under `key`, wiping the value it replaces.
+    fn insert(&mut self, key: String, value: String) {
+        if let Some(mut old) = self.0.insert(key, value) {
+            old.zeroize();
+        }
+    }
+
+    /// Remove `key`, wiping its value.
+    fn remove(&mut self, key: &str) {
+        if let Some(mut old) = self.0.remove(key) {
+            old.zeroize();
+        }
+    }
+}
 
 impl Drop for Secrets {
     fn drop(&mut self) {
@@ -155,12 +174,6 @@ impl std::ops::Deref for Secrets {
     type Target = BTreeMap<String, String>;
     fn deref(&self) -> &Self::Target {
         &self.0
-    }
-}
-
-impl std::ops::DerefMut for Secrets {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
     }
 }
 
@@ -354,21 +367,15 @@ impl Vault {
         let mut value = Zeroizing::new(value.into());
         crate::dotenv::check_key(key)?;
         crate::dotenv::check_value(key, &value)?;
-        if let Some(mut old) = self
-            .vars
-            .insert(key.to_string(), std::mem::take(&mut *value))
-        {
-            old.zeroize();
-        }
+        self.vars
+            .insert(key.to_string(), std::mem::take(&mut *value));
         Ok(())
     }
 
     /// Remove a secret and wipe its value. The value is not returned: no caller needs it, and
     /// a returned copy would outlive the vault unwiped.
     pub fn unset(&mut self, key: &str) {
-        if let Some(mut old) = self.vars.remove(key) {
-            old.zeroize();
-        }
+        self.vars.remove(key);
     }
 
     /// The first name here that decides how a process runs, if any.

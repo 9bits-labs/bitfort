@@ -5,7 +5,7 @@
 #
 # macOS only: `check-heap-wipe.c` interposes `free` and `realloc` through DYLD_INSERT_LIBRARIES,
 # and is built with clang (Xcode command line tools). The keyring is never touched: the identity
-# comes from `identity new`, through the environment.
+# comes from `identity new`, through the environment and, for the last read, a file.
 #
 # A command that frees nothing, or exits with a status other than the expected one, fails too.
 # Otherwise an interposer that did not load, or a setup step that broke, would read as a pass.
@@ -87,6 +87,17 @@ watch "export shell" 0 "" export --format shell
 watch "export json" 0 "" export --format json
 watch "run" 0 "" run -- /usr/bin/true
 watch "run --clean" 0 "" run --clean -- /usr/bin/true
+watch "set (argument)" 0 "" set "B=$ours"
+printf 'C=%s\n' "$ours" >"$work/import.env"
+watch "import" 0 "" import "$work/import.env"
+watch "unset" 0 "" unset --yes C
+watch "rotate" 0 "" rotate
+
+# A second member, so that both membership commands re-encrypt the vault.
+invite=$("$bin" identity new --force --name second 2>/dev/null |
+  sed -n 's/^# \(bfinvite1:.*\)/\1/p')
+watch "member add" 0 "" member add --yes "$invite"
+watch "member rm" 0 "" member rm --yes second
 
 # A conflict on A: main holds $ours, a branch holds $theirs.
 bf set --yes A=base
@@ -104,6 +115,12 @@ if g merge -q --no-edit feature >/dev/null 2>&1; then
 fi
 watch "resolve (no side)" 1 "" resolve
 watch "resolve --theirs" 0 "" resolve --theirs
+
+# The same identity, read from a file instead of the environment.
+chmod 600 "$work/id.key"
+unset BITFORT_IDENTITY BITFORT_SIGN_IDENTITY
+export BITFORT_IDENTITY_FILE=$work/id.key
+watch "get (identity file)" 0 "" get A
 
 [ "$failed" -eq 0 ] || exit 1
 echo "ok: no secret left in freed heap memory"

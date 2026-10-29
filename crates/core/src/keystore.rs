@@ -121,8 +121,8 @@ fn parse_identity_file(
     let pairs = dotenv::parse(contents).map_err(|e| Error::InvalidKey(format!("{origin}: {e}")))?;
     for (key, value) in pairs {
         match key.as_str() {
-            ENV_ENC => enc = Some(Zeroizing::new(value)),
-            ENV_SIGN => sign = Some(Zeroizing::new(value)),
+            ENV_ENC => enc = Some(value),
+            ENV_SIGN => sign = Some(value),
             _ => {}
         }
     }

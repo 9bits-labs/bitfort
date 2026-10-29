@@ -8,12 +8,17 @@
 
 use std::fmt::Write as _;
 
+use zeroize::Zeroizing;
+
 use crate::error::{Error, Result};
 
 /// Parse dotenv text into ordered `(key, value)` pairs. Later duplicate keys win,
 /// mirroring how a shell sourcing the file would behave; the caller decides how to
 /// merge them into the vault. Keys must be valid environment-variable names.
-pub fn parse(input: &str) -> Result<Vec<(String, String)>> {
+///
+/// Each value is zeroized on drop, including the pairs already read when a later line fails
+/// and the error drops them: an identity file's keys come through here as well as a `.env`.
+pub fn parse(input: &str) -> Result<Vec<(String, Zeroizing<String>)>> {
     let mut out = Vec::new();
     for (i, raw) in input.lines().enumerate() {
         let line = raw.trim();
@@ -38,7 +43,7 @@ pub fn parse(input: &str) -> Result<Vec<(String, String)>> {
                 i + 1
             )));
         }
-        out.push((key.to_string(), unquote(value.trim())));
+        out.push((key.to_string(), Zeroizing::new(unquote(value.trim()))));
     }
     Ok(out)
 }
@@ -321,6 +326,15 @@ fn unquote(value: &str) -> String {
 mod tests {
     use super::*;
 
+    /// [`parse`] with plain values, to compare against literals.
+    fn parse_plain(input: &str) -> Vec<(String, String)> {
+        parse(input)
+            .unwrap()
+            .into_iter()
+            .map(|(k, v)| (k, v.to_string()))
+            .collect()
+    }
+
     proptest::proptest! {
         /// `quoted` and `unescape` must be exact inverses, and a fixed list of values can only
         /// ever check the escapes somebody remembered to add to it - which is how the two
@@ -335,7 +349,7 @@ mod tests {
         fn to_dotenv_survives_any_value(value in ".*") {
             let text = to_dotenv([("K", value.as_str())]).unwrap();
             proptest::prop_assert_eq!(text.lines().count(), 1, "value broke the line structure");
-            proptest::prop_assert_eq!(parse(&text).unwrap(), vec![("K".to_string(), value)]);
+            proptest::prop_assert_eq!(parse_plain(&text), vec![("K".to_string(), value)]);
         }
     }
 
@@ -351,7 +365,7 @@ EMPTY=
 
 WITH_HASH=abc#notacomment
 ";
-        let got = parse(input).unwrap();
+        let got = parse_plain(input);
         assert_eq!(
             got,
             vec![
@@ -367,7 +381,7 @@ WITH_HASH=abc#notacomment
 
     #[test]
     fn later_duplicate_wins_ordering_preserved() {
-        let got = parse("A=1\nB=2\nA=3\n").unwrap();
+        let got = parse_plain("A=1\nB=2\nA=3\n");
         assert_eq!(
             got,
             vec![
@@ -408,15 +422,14 @@ WITH_HASH=abc#notacomment
             ("QUOTED_WHOLE".to_string(), "\"wrapped\"".to_string()),
         ];
         let text = to_dotenv(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str()))).unwrap();
-        assert_eq!(parse(&text).unwrap(), pairs);
+        assert_eq!(parse_plain(&text), pairs);
     }
 
     #[test]
     fn single_quotes_stay_literal_and_unknown_escapes_survive() {
         // A single-quoted value is literal, as in the shell and every dotenv reader; this
         // crate never emits one, so the escapes in it come from a hand-written file.
-        let got =
-            parse("A='a\\nb'\nB=\"x\\qy\"\nC=\"trailing\\\\\"\nD=\"\\x2f\\u00e9\"\n").unwrap();
+        let got = parse_plain("A='a\\nb'\nB=\"x\\qy\"\nC=\"trailing\\\\\"\nD=\"\\x2f\\u00e9\"\n");
         assert_eq!(
             got,
             vec![
@@ -436,7 +449,7 @@ WITH_HASH=abc#notacomment
         // `bytes.len() >= 2` counts bytes. An accented password made `import` panic - and the
         // panic message named the character, which is the first byte of a secret.
         assert_eq!(
-            parse("PW=éxample\nDASH=—\nQ=\"é\"\n").unwrap(),
+            parse_plain("PW=éxample\nDASH=—\nQ=\"é\"\n"),
             vec![
                 ("PW".into(), "éxample".into()),
                 ("DASH".into(), "—".into()),
@@ -447,7 +460,7 @@ WITH_HASH=abc#notacomment
 
     #[test]
     fn a_malformed_hex_escape_is_kept_verbatim() {
-        let got = parse("A=\"\\xZZ\"\nB=\"\\u12\"\n").unwrap();
+        let got = parse_plain("A=\"\\xZZ\"\nB=\"\\u12\"\n");
         assert_eq!(
             got,
             vec![("A".into(), "\\xZZ".into()), ("B".into(), "\\u12".into())]

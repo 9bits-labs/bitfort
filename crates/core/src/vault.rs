@@ -21,7 +21,7 @@ use std::io::{Read, Write};
 
 use age::armor::{ArmoredReader, ArmoredWriter, Format};
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::chain::Chain;
 use crate::error::{Error, Result};
@@ -112,7 +112,7 @@ pub enum Drift {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Vault {
     pub env: String,
-    vars: BTreeMap<String, String>,
+    vars: Secrets,
     provenance: Option<Provenance>,
     /// Process-control names this vault already carried when it was decrypted.
     ///
@@ -136,6 +136,34 @@ impl std::fmt::Debug for Vault {
     }
 }
 
+/// A vault's secrets, with each value wiped when the map drops (invariant 6). The wipe lives
+/// on the map, not on [`Vault`], so it also covers a payload that `decrypt` refuses, a map
+/// that `with_vars` refuses, and every clone. Serialized as the bare map.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+struct Secrets(BTreeMap<String, String>);
+
+impl Drop for Secrets {
+    fn drop(&mut self) {
+        for value in self.0.values_mut() {
+            value.zeroize();
+        }
+    }
+}
+
+impl std::ops::Deref for Secrets {
+    type Target = BTreeMap<String, String>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Secrets {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 /// The on-disk payload: everything in [`Vault`] plus the context it is bound to and the
 /// signature over all of it. Private, and the only serialized form, so no code path can
 /// write a vault that carries no signature.
@@ -149,7 +177,7 @@ struct Document<'a> {
     project_id: Cow<'a, str>,
     env: Cow<'a, str>,
     roster_version: u64,
-    vars: Cow<'a, BTreeMap<String, String>>,
+    vars: Cow<'a, Secrets>,
     written_at: Cow<'a, str>,
     signature: Signature,
 }
@@ -282,7 +310,7 @@ impl Vault {
     pub fn new(env: impl Into<String>) -> Self {
         Self {
             env: env.into(),
-            vars: BTreeMap::new(),
+            vars: Secrets::default(),
             provenance: None,
             admitted: BTreeSet::new(),
         }
@@ -291,8 +319,10 @@ impl Vault {
     /// A new vault for `env` holding `vars`, refusing the whole map if any name is not an
     /// environment variable name - the way `resolve` builds one from a merge of two decrypted
     /// vaults. Built in one step, so there is no moment where the map is in but unchecked.
+    /// The map is wrapped before the checks, so a refused one is wiped here.
     pub fn with_vars(env: impl Into<String>, vars: BTreeMap<String, String>) -> Result<Self> {
-        for (key, value) in &vars {
+        let vars = Secrets(vars);
+        for (key, value) in vars.iter() {
             crate::dotenv::check_key(key)?;
             crate::dotenv::check_value(key, value)?;
         }
@@ -315,24 +345,30 @@ impl Vault {
         &self.vars
     }
 
-    /// Take the secrets out, for a caller that owns them from here on - `run`, which hands
-    /// them to the child and then zeroizes its copy.
-    pub fn into_vars(self) -> BTreeMap<String, String> {
-        self.vars
-    }
-
     /// Set (or overwrite) a secret, refusing a name that is not an environment variable name.
+    ///
+    /// The value is wrapped before either check, so a refused one is wiped here: a caller that
+    /// moved its only copy in, as `import` does, has nothing left to wipe. An overwritten
+    /// value is wiped too.
     pub fn set(&mut self, key: &str, value: impl Into<String>) -> Result<()> {
+        let mut value = Zeroizing::new(value.into());
         crate::dotenv::check_key(key)?;
-        let value = value.into();
         crate::dotenv::check_value(key, &value)?;
-        self.vars.insert(key.to_string(), value);
+        if let Some(mut old) = self
+            .vars
+            .insert(key.to_string(), std::mem::take(&mut *value))
+        {
+            old.zeroize();
+        }
         Ok(())
     }
 
-    /// Remove a secret, returning the old value if present.
-    pub fn unset(&mut self, key: &str) -> Option<String> {
-        self.vars.remove(key)
+    /// Remove a secret and wipe its value. The value is not returned: no caller needs it, and
+    /// a returned copy would outlive the vault unwiped.
+    pub fn unset(&mut self, key: &str) {
+        if let Some(mut old) = self.vars.remove(key) {
+            old.zeroize();
+        }
     }
 
     /// The first name here that decides how a process runs, if any.
@@ -634,7 +670,7 @@ mod format_vectors {
             project_id: Cow::Owned(roster.project_id.clone()),
             env: Cow::Owned(roster.env.clone()),
             roster_version: roster.roster_version,
-            vars: Cow::Owned(vars),
+            vars: Cow::Owned(Secrets(vars)),
             written_at: Cow::Owned(WRITTEN_AT.to_string()),
             signature: Signature::placeholder(),
         };
@@ -1026,7 +1062,7 @@ mod tests {
         assert!(armored.starts_with("-----BEGIN AGE ENCRYPTED FILE-----"));
 
         let out = open(&armored, &alice, &r, "development").unwrap();
-        assert_eq!(out.vars, vault.vars);
+        assert_eq!(out.vars(), vault.vars());
         let p = out.provenance().unwrap();
         assert_eq!(p.signer, "alice");
         assert_eq!(p.sign_pubkey, alice.sign_pubkey());
@@ -1056,7 +1092,7 @@ mod tests {
 
         for id in [&alice, &bob] {
             let out = open(&armored, id, &r, "development").unwrap();
-            assert_eq!(out.vars, sample().vars);
+            assert_eq!(out.vars(), sample().vars());
         }
     }
 

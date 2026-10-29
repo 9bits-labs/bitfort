@@ -7,6 +7,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::json;
+use zeroize::Zeroizing;
 
 use bitfort_core::project::{MergeBase, VaultConflict, Verified};
 use bitfort_core::vault::{Drift, Provenance, VALUE_SIZE_WARN};
@@ -402,8 +403,9 @@ pub fn import(
     let identity = load_identity()?;
     let mut vault = open_vault(project, env, &identity, &verified, Use::Rewrite)?;
 
-    let contents =
-        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let contents = Zeroizing::new(
+        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?,
+    );
     // The advice is added here, not in the parser: an identity file goes through the same
     // parser, and `bitfort set` is no fix for one. It fits only a line with no `=`, the
     // shape a multi-line value's later lines take.
@@ -418,13 +420,14 @@ pub fn import(
     }
 
     let (mut added, mut updated) = (0usize, 0usize);
-    for (key, value) in pairs {
+    for (key, mut value) in pairs {
         if vault.vars().contains_key(&key) {
             updated += 1;
         } else {
             added += 1;
         }
-        vault.set(&key, value)?;
+        // Moved out of the wrapper, not copied, so no second plaintext buffer exists.
+        vault.set(&key, std::mem::take(&mut *value))?;
     }
     warn_oversized(&vault);
 
@@ -731,7 +734,7 @@ pub fn run(
     let vault = opened.read_vault("run")?;
     refuse_process_control_vars(&vault, "inject it into the child")?;
 
-    crate::run::exec(vault.into_vars(), clean, command)
+    crate::run::exec(vault, clean, command)
 }
 
 /// `bitfort env add <name>`: create a new environment - its own signed v1 roster and

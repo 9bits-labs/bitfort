@@ -12,44 +12,28 @@ use std::collections::BTreeMap;
 use std::process::{Child, Command, Stdio};
 
 use anyhow::{anyhow, Context, Result};
-use bitfort_core::keystore;
-use zeroize::Zeroize;
+use bitfort_core::{keystore, Vault};
 
-/// Build the child command, inject `vars`, run it, and return the code the CLI should
-/// exit with. `clean` starts from a minimal environment (PATH + HOME) instead of
+/// Build the child command, inject the vault's secrets, run it, and return the code the CLI
+/// should exit with. `clean` starts from a minimal environment (PATH + HOME) instead of
 /// inheriting the parent's; secrets are overlaid last so they always win.
 ///
-/// `vars` has already been screened by [`crate::commands::refuse_process_control_vars`], which
-/// every command that turns vault contents into an environment shares.
-pub fn exec(vars: BTreeMap<String, String>, clean: bool, command: &[String]) -> Result<i32> {
-    let vars = Plaintext(vars);
+/// The vault has already been screened by [`crate::commands::refuse_process_control_vars`],
+/// which every command that turns vault contents into an environment shares. It is taken by
+/// value: this is the sole owner of the plaintext, and a [`Vault`] wipes its values when it
+/// drops, on every path out of here, error paths included (invariant 6).
+pub fn exec(vault: Vault, clean: bool, command: &[String]) -> Result<i32> {
     // Opened before anything is spawned. Handlers used to be installed after `spawn`
     // returned, leaving a window - measured at 16 to 54 us - in which a SIGTERM took
     // bitfort's default action, killed it, and orphaned a child holding every secret.
     let session = Session::open()?;
 
-    let spawned = spawn(&vars.0, clean, command, session.child_terminal());
+    let spawned = spawn(vault.vars(), clean, command, session.child_terminal());
     // The child holds its own copy of the environment by now, and on a failure it never
     // will - either way this process is finished with the plaintext. Dropping here rather
     // than at the end of the function keeps the scrub as early as it has always been.
-    drop(vars);
+    drop(vault);
     session.supervise(spawned?)
-}
-
-/// The decrypted values, scrubbed when they go out of scope.
-///
-/// A `Drop` rather than a call at the end of `exec`, because the call kept missing an error
-/// path: first the ones inside `spawn`, then the `?` on `Session::open`. This is the sole
-/// owner of the plaintext (`commands::run` hands over the vault's map), so nothing else can
-/// keep a copy alive past this scope (invariant 6).
-struct Plaintext(BTreeMap<String, String>);
-
-impl Drop for Plaintext {
-    fn drop(&mut self) {
-        for value in self.0.values_mut() {
-            value.zeroize();
-        }
-    }
 }
 
 /// Build the command and start the child.

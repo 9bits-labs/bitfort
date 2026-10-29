@@ -1048,31 +1048,21 @@ pub fn member_rm(
     Ok(())
 }
 
-/// `bitfort member list`: show the target env's roster and verification status (read
-/// path). Terminal: a table with roles colored (maintainer bold, member dim), the local
-/// identity marked `(you)`, and the verification state in the title. Piped: the stable
+/// `bitfort member list`: show the target env's verified roster (read path). Terminal: a
+/// table with roles colored (maintainer bold, member dim), the local identity marked
+/// `(you)`, and the roster version in the title. Piped: the stable
 /// `{fingerprint}  {role}  {name}` line per member.
+///
+/// An unverified roster is refused, not printed with a warning: editing `keys.json` needs
+/// no key, so printing it would show a row nobody signed under exit 0.
 pub fn member_list(ui: &Ui, start: Option<&Path>, env: Option<&str>) -> Result<()> {
     const NAME_W: usize = 18;
     const ROLE_W: usize = 12;
 
     let opened = open(start, env)?;
-    let (project, env) = (&opened.project, opened.env.as_str());
-
-    // Verify once and reuse: for the stderr warning, the title status, and (on success)
-    // the member list itself - avoiding a second verify plus a redundant roster load.
-    let verified = project.verify_roster(env);
-    if let Err(e) = &verified {
-        // Under `--json` the failure is carried in the payload (`verified:false` + `error`),
-        // so a plain-text stderr line would just be inconsistent noise; skip it there.
-        if !ui.json() {
-            eprintln!("warning: roster verification failed: {e}");
-        }
-    }
-    let roster = match &verified {
-        Ok(v) => v.roster.clone(),
-        Err(_) => project.load_roster(env)?,
-    };
+    let env = opened.env.as_str();
+    let verified = opened.verified("list members")?;
+    let roster = &verified.roster;
 
     if ui.json() {
         let me = keystore::load_identity().ok().map(|id| id.sign_pubkey());
@@ -1089,7 +1079,7 @@ pub fn member_list(ui: &Ui, start: Option<&Path>, env: Option<&str>) -> Result<(
             })
             .collect();
         let mut obj = json!({ "environment": env, "members": members });
-        merge_roster_json(&mut obj, verified.as_ref());
+        merge_roster_json(&mut obj, Ok(&verified));
         ui.emit_json(&obj)?;
         return Ok(());
     }
@@ -1110,22 +1100,12 @@ pub fn member_list(ui: &Ui, start: Option<&Path>, env: Option<&str>) -> Result<(
         return Ok(());
     }
 
-    let status = match &verified {
-        Ok(v) => format!(
-            "{}  {} {}",
-            ui.dim(&format!("v{}", v.roster.roster_version)),
-            ui.mark(Level::Ok),
-            ui.styled(Level::Ok, "verified")
-        ),
-        Err(_) => format!(
-            "{} {}",
-            ui.mark(Level::Fail),
-            ui.styled(Level::Fail, "unverified")
-        ),
-    };
     ui.line(&format!(
-        "{}   {status}",
-        ui.bold(&format!("ROSTER · {env}"))
+        "{}   {}  {} {}",
+        ui.bold(&format!("ROSTER · {env}")),
+        ui.dim(&format!("v{}", roster.roster_version)),
+        ui.mark(Level::Ok),
+        ui.styled(Level::Ok, "verified")
     ))?;
     ui.blank()?;
     ui.line(&ui.dim(&format!(

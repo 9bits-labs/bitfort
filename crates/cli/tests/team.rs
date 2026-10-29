@@ -680,3 +680,25 @@ fn a_name_that_would_forge_a_member_list_row_is_refused() {
         .success()
         .stdout(predicate::str::contains("maintainer").count(1));
 }
+
+/// Editing `keys.json` needs no key, so a `member list` that prints an unverified roster shows
+/// whatever the editor wrote, as a row nobody signed. It refuses instead, like every other
+/// read path, and prints no member under either output format.
+#[test]
+fn member_list_refuses_a_roster_edited_without_a_signature() {
+    let f = init_project();
+    let project = Project::discover(f.dir.path()).unwrap();
+    let mut roster = project.load_roster("development").unwrap();
+    // No `sign`: the signature still covers the old name.
+    roster.members[0].name = "forged".to_string();
+    project.save_roster("development", &roster).unwrap();
+
+    for args in [&["member", "list"][..], &["--json", "member", "list"]] {
+        bf(f.dir.path(), &f.id)
+            .args(args)
+            .assert()
+            .failure()
+            .stdout("")
+            .stderr(predicate::str::contains("refusing to list members"));
+    }
+}

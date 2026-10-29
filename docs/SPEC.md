@@ -476,6 +476,8 @@ unavailable in a shallow clone or outside a repository; the chain lives in `chai
   Roster verification cannot grant *you* access - `age` decryption consults only your identity and
   the ciphertext - but the verified roster is what authenticates the **vault payload** (§4.4), and
   a read path that continues past a failed roster is exactly how a forged vault reaches `run`.
+  `member list` refuses as well, for a third reason: editing `keys.json` needs no key, so a
+  listing of an unverified roster shows rows that nobody signed.
 - The dedicated `verify` command exits non-zero on any **hard** failure in either signed file:
   a bad chain, a rollback, roster tampering, a vault no member of its roster signed, a vault
   addressed to more keys than that roster has members, a vault that has drifted from `keys.json`
@@ -512,7 +514,7 @@ Binary: `bitfort`. All commands operate on the `.bitfort/` dir found by walking 
 | `bitfort env list` | List environments and per-env roster/verification status. |
 | `bitfort member add <invite> [--maintainer] [--name <n>]` | (maintainer) Add recipient to the target env, bump+sign roster, re-encrypt. Requires the current roster to be committed. A display name must be printable ASCII (U+0020 to U+007E) of at most 64 characters, so it cannot forge a row in `member list` nor impersonate another member with an invisible character. |
 | `bitfort member rm <name>` | (maintainer) Remove recipient, bump+sign roster, re-encrypt (see rotate). Refuses the last maintainer. Confirms first (skip with `-y`). |
-| `bitfort member list` | Show the target env's roster and verification status. |
+| `bitfort member list` | Show the target env's verified roster. Refuses a roster that does not verify (§5.5). |
 | `bitfort rotate` | Re-encrypt vault to current roster with fresh ciphertext; advises rotating the upstream values via `bitfort set`. |
 | `bitfort resolve [--ours\|--theirs]` | After a merge/rebase conflict, merge both vault sides and re-encrypt cleanly; a key changed on both sides needs `--ours`/`--theirs` (see §4.5). |
 | `bitfort completions <shell>` | Print a shell completion script (bash/zsh/fish/…) to stdout. |

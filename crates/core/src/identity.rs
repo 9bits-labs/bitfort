@@ -7,12 +7,13 @@
 //! copies of key material in freed heap memory.
 
 use age::secrecy::ExposeSecret;
-use base64::Engine;
+use base64::{DecodeError, Engine};
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{Error, Result};
+use crate::keystore::{ENV_ENC, ENV_SIGN};
 
 pub(crate) const SIGN_PUBKEY_PREFIX: &str = "ed25519:";
 pub(crate) const B64: base64::engine::general_purpose::GeneralPurpose =
@@ -39,23 +40,32 @@ impl Identity {
         Ok(Self { enc, sign })
     }
 
-    /// Reconstruct an identity from its two secret strings (the keyring / env form).
+    /// Reconstruct an identity from its two secret strings (the keyring / env form). An error
+    /// names the variable that holds the bad secret, so it does not read like an error in a
+    /// roster key.
     pub fn from_secret_strings(enc: &str, sign: &str) -> Result<Self> {
         let enc: age::x25519::Identity = enc
             .trim()
             .parse()
-            .map_err(|e: &str| Error::InvalidKey(format!("encryption key: {e}")))?;
+            .map_err(|e: &str| Error::InvalidKey(format!("{ENV_ENC}: {e}")))?;
 
         // Zeroizing so the decoded secret is scrubbed on every exit path, including the
-        // length-mismatch error below.
-        let bytes = Zeroizing::new(
-            B64.decode(sign.trim())
-                .map_err(|e| Error::InvalidKey(format!("signing key: {e}")))?,
-        );
+        // length-mismatch error below. The decoder's own message quotes a byte of the key and
+        // its offset, so each kind of error gets a fixed text instead (invariant 6).
+        let bytes = Zeroizing::new(B64.decode(sign.trim()).map_err(|e| {
+            let why = match e {
+                DecodeError::InvalidByte(..) | DecodeError::InvalidLastSymbol(..) => {
+                    "a character is wrong"
+                }
+                DecodeError::InvalidLength(_) => "it has the wrong length; it may be cut short",
+                DecodeError::InvalidPadding => "the `=` padding at its end is wrong or missing",
+            };
+            Error::InvalidKey(format!("{ENV_SIGN} is not valid base64: {why}"))
+        })?);
         let mut seed: [u8; 32] = bytes
             .as_slice()
             .try_into()
-            .map_err(|_| Error::InvalidKey("signing key must be 32 bytes".into()))?;
+            .map_err(|_| Error::InvalidKey(format!("{ENV_SIGN} must decode to 32 bytes")))?;
         let sign = SigningKey::from_bytes(&seed);
         seed.zeroize();
 
@@ -186,12 +196,61 @@ mod tests {
         assert!(vk.verify_strict(msg, &sig).is_ok());
     }
 
+    /// The decoder's own error quotes a byte of the input and its offset. The two low bits of
+    /// the last symbol are always zero, so a one-bit typo there gives away the real key
+    /// character. Each kind of error gets a fixed text that says what is wrong without
+    /// quoting the key (invariant 6). The text names the variable: a roster's public signing
+    /// key fails with "signing key ..." texts, so a bare "signing key" sends the user to
+    /// `keys.json` instead of to their own identity.
     #[test]
-    fn malformed_secret_strings_are_rejected() {
-        assert!(Identity::from_secret_strings("not-an-age-key", "AAAA").is_err());
+    fn a_malformed_signing_key_is_named_and_not_quoted() {
         let id = Identity::generate().unwrap();
-        assert!(Identity::from_secret_strings(&id.enc_secret(), "!!!not-base64").is_err());
-        // Well-formed base64 but wrong length must be rejected (and zeroized).
-        assert!(Identity::from_secret_strings(&id.enc_secret(), "QQ==").is_err());
+        let (enc, sign) = (id.enc_secret(), id.sign_secret());
+        let invalid =
+            |why: &str| format!("invalid key material: {ENV_SIGN} is not valid base64: {why}");
+        let cases = [
+            // Offset 42 is the last data symbol; `B` (value 1) sets a low bit there.
+            (
+                format!("{}B{}", &sign[..42], &sign[43..]),
+                invalid("a character is wrong"),
+            ),
+            (
+                format!("{}!{}", &sign[..10], &sign[11..]),
+                invalid("a character is wrong"),
+            ),
+            // Cut short: without the trailing `=`, and with one symbol in the last quad.
+            (
+                sign[..43].to_string(),
+                invalid("the `=` padding at its end is wrong or missing"),
+            ),
+            (
+                sign[..41].to_string(),
+                invalid("it has the wrong length; it may be cut short"),
+            ),
+            // Well-formed base64 of the wrong length, rejected (and zeroized) after decoding.
+            (
+                "QQ==".to_string(),
+                format!("invalid key material: {ENV_SIGN} must decode to 32 bytes"),
+            ),
+        ];
+        for (bad, expected) in cases {
+            let err = Identity::from_secret_strings(&enc, &bad).err().unwrap();
+            assert_eq!(err.to_string(), expected);
+        }
+    }
+
+    /// A malformed encryption key names its variable too. The `age` parser's error is a fixed
+    /// text, so it is passed on.
+    #[test]
+    fn a_malformed_encryption_key_is_named() {
+        let id = Identity::generate().unwrap();
+        let err = Identity::from_secret_strings("not-an-age-key", &id.sign_secret())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            err.starts_with(&format!("invalid key material: {ENV_ENC}: ")),
+            "{err}"
+        );
     }
 }

@@ -104,8 +104,18 @@ pub fn load_identity_file(path: &Path) -> Result<Identity> {
         }
     }
     let contents = Zeroizing::new(std::fs::read_to_string(path)?);
-    let (enc, sign) = parse_identity_file(&contents, &format!("identity file {}", path.display()))?;
-    Identity::from_secret_strings(&enc, &sign)
+    identity_from_text(&contents, &format!("identity file {}", path.display()))
+}
+
+/// Build an identity from the text of an identity file or a keyring entry. A key error starts
+/// with `origin`: the variable it names is not set in the environment, so the name alone
+/// would send the user to the wrong place.
+fn identity_from_text(contents: &str, origin: &str) -> Result<Identity> {
+    let (enc, sign) = parse_identity_file(contents, origin)?;
+    Identity::from_secret_strings(&enc, &sign).map_err(|e| match e {
+        Error::InvalidKey(m) => Error::InvalidKey(format!("{origin}: {m}")),
+        e => e,
+    })
 }
 
 /// Parse the two key variables out of a dotenv-style identity file, with the parser `import`
@@ -147,8 +157,7 @@ fn load_from_keyring() -> Result<Identity> {
 /// Rebuild an identity from a stored blob, reusing the identity-file parser so the
 /// serialization format lives in exactly one place.
 fn build_identity(blob: &str) -> Result<Identity> {
-    let (enc, sign) = parse_identity_file(blob, "the keyring entry")?;
-    Identity::from_secret_strings(&enc, &sign)
+    identity_from_text(blob, "the keyring entry")
 }
 
 /// Serialize both secrets into one blob (the identity-file format). Zeroized on drop so
@@ -288,6 +297,43 @@ mod tests {
         let found = identity_from_env(lookup(&vars)).unwrap().unwrap();
         assert_eq!(found.anchor(), id.anchor());
         assert!(identity_from_env(lookup(&[])).unwrap().is_none());
+    }
+
+    /// A malformed signing key reaches the user from each source with the variable's name
+    /// and, for a file or the keyring entry, where it was read. Each message is compared in
+    /// full, so a wrapper that adds the value or the decoder's own text fails here
+    /// (invariant 6).
+    #[test]
+    fn a_malformed_signing_key_is_named_and_not_quoted_on_every_path() {
+        let id = Identity::generate().unwrap();
+        let (enc, sign) = (id.enc_secret(), id.sign_secret());
+        // A wrong last symbol, the case the identity tests explain.
+        let bad = format!("{}B{}", &sign[..42], &sign[43..]);
+        let text = format!("{ENV_ENC}={}\n{ENV_SIGN}={bad}\n", enc.as_str());
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(text.as_bytes()).unwrap();
+        let vars = [(ENV_ENC, enc.as_str()), (ENV_SIGN, bad.as_str())];
+        let why = format!("{ENV_SIGN} is not valid base64: a character is wrong");
+
+        for (err, origin) in [
+            (
+                identity_from_env(lookup(&vars)).err().unwrap(),
+                String::new(),
+            ),
+            (
+                load_identity_file(file.path()).err().unwrap(),
+                format!("identity file {}: ", file.path().display()),
+            ),
+            (
+                build_identity(&text).err().unwrap(),
+                "the keyring entry: ".into(),
+            ),
+        ] {
+            assert_eq!(
+                err.to_string(),
+                format!("invalid key material: {origin}{why}")
+            );
+        }
     }
 
     #[test]

@@ -1,0 +1,51 @@
+# The AGENTS.md verification loop, on every push to main and every pull request. Linux runs
+# step 1, and is the platform invariant 5 is about. macOS runs the tests and check-heap-wipe.sh
+# (invariant 6), which interposes the macOS allocator and runs nowhere else.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels the run for the older one; runs on main all finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  linux:
+    name: verify linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The repository pins no toolchain, so CI builds with the current stable, as a contributor does.
+      - run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace
+      - run: scripts/check-cli-build.sh
+
+  macos:
+    name: verify macos
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo test --workspace
+      - run: cargo build --workspace
+      - run: scripts/check-heap-wipe.sh

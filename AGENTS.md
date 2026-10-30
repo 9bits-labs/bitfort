@@ -56,6 +56,11 @@ fails if a freed heap block still holds one (invariant 6). Normal tests cannot s
 the output is the same either way. It needs clang (Xcode command line tools); on Linux, skip it
 and say so in the report. A new command that handles secrets gets a `watch` line in the script.
 
+**CI.** `.github/workflows/ci.yml` runs step 1 on Linux, and `cargo test` plus
+`check-heap-wipe.sh` on macOS, for each pull request and each push to `main`; `lint.yml` lints
+the workflows. CI does not replace this loop: it does not drive the command you changed, and it
+runs no review.
+
 **3. Review.** BitFort is a security product, so every significant change gets reviewed before
 it is called done. Run against the diff, apply the results, then re-run steps 1-2:
 

@@ -67,12 +67,14 @@ impl Identity {
             Err(DecodeSliceError::DecodeError(
                 DecodeError::InvalidByte(at, _) | DecodeError::InvalidLastSymbol(at, _),
             )) => {
-                // The decoder counts bytes from the end of the leading whitespace that `trim`
-                // removes, and the user counts characters from the start of the value. Every
-                // byte before the bad one is a base64 symbol, so only the whitespace can hold a
-                // multi-byte character.
-                let lead = sign.chars().take_while(|c| c.is_whitespace()).count();
-                Err(invalid(&format!("character {} is wrong", lead + at + 1)))
+                // `at` counts bytes from the end of the leading whitespace that `trim` removes,
+                // and the user counts characters from the start of the value. A multi-byte
+                // character can come before the bad byte, or hold it: the decoder checks a lone
+                // last byte before the rest. So count the characters up to the one that holds
+                // that byte.
+                let at = sign.len() - sign.trim_start().len() + at;
+                let n = sign.char_indices().take_while(|&(i, _)| i <= at).count();
+                Err(invalid(&format!("character {n} is wrong")))
             }
             Err(DecodeSliceError::DecodeError(DecodeError::InvalidLength(_))) => {
                 Err(invalid("it has the wrong length; it may be cut short"))
@@ -236,6 +238,16 @@ mod tests {
             (
                 format!("\u{a0} {}!{}", &sign[..10], &sign[11..]),
                 invalid("character 13 is wrong"),
+            ),
+            // 44 characters in 45 bytes: the decoder checks a lone last byte first, so the
+            // bad byte it names can come after a multi-byte character, or be inside one.
+            (
+                format!("{}\u{e9}{}!", &sign[..10], &sign[11..43]),
+                invalid("character 44 is wrong"),
+            ),
+            (
+                format!("{}\u{e9}", &sign[..43]),
+                invalid("character 44 is wrong"),
             ),
             // Cut short: without the trailing `=`, and with one symbol in the last quad.
             (

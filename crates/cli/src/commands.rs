@@ -80,7 +80,7 @@ pub fn init(ui: &Ui, start: Option<&Path>, name: Option<String>) -> Result<()> {
         ui.status(Level::Warn, "invalid", "use letters, digits, '-' or '_'")?;
     };
 
-    let identity = acquire_identity()?;
+    let (identity, _) = acquire_identity()?;
     let anchor = identity.anchor();
 
     let config = Config::new(config::generate_project_id()?, &env, anchor.clone());
@@ -190,14 +190,7 @@ pub fn keygen(ui: &Ui, name: Option<String>) -> Result<()> {
     let name = resolve_name(name);
     // Refuse here so a rejected name never reaches an invite blob.
     bitfort_core::roster::validate_member_name(&name)?;
-    let (identity, created) = match find_identity()? {
-        Some(id) => (id, false),
-        None => {
-            let id = Identity::generate()?;
-            keystore::store_identity(&id)?;
-            (id, true)
-        }
-    };
+    let (identity, created) = acquire_identity()?;
 
     let status = if created {
         "generated a new identity (stored in the OS keyring)"
@@ -2009,13 +2002,14 @@ fn load_identity() -> Result<Identity> {
 }
 
 /// Adopt the existing identity if one is configured, else generate and store a new one.
-fn acquire_identity() -> Result<Identity> {
+/// The flag says whether it was generated.
+fn acquire_identity() -> Result<(Identity, bool)> {
     match find_identity()? {
-        Some(id) => Ok(id),
+        Some(id) => Ok((id, false)),
         None => {
             let id = Identity::generate()?;
             keystore::store_identity(&id)?;
-            Ok(id)
+            Ok((id, true))
         }
     }
 }

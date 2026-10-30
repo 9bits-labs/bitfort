@@ -51,8 +51,8 @@ impl Identity {
 
         // Decoded into a stack buffer that is wiped on every exit path. `decode` puts the seed
         // in a heap block of its own and frees it unwiped when the key fails part way. The
-        // decoder's own message quotes a byte of the key and its offset, so each kind of error
-        // gets a fixed text instead (invariant 6).
+        // decoder's own message quotes a byte of the key, so each kind of error gets a fixed
+        // text instead, with the position of the bad character counted from 1 (invariant 6).
         let mut seed = Zeroizing::new([0u8; 32]);
         match B64.decode_slice(sign.trim(), seed.as_mut_slice()) {
             Ok(32) => Ok(Self {
@@ -64,11 +64,15 @@ impl Identity {
             ))),
             Err(DecodeSliceError::DecodeError(e)) => {
                 let why = match e {
-                    DecodeError::InvalidByte(..) | DecodeError::InvalidLastSymbol(..) => {
-                        "a character is wrong"
+                    DecodeError::InvalidByte(at, _) | DecodeError::InvalidLastSymbol(at, _) => {
+                        format!("character {} is wrong", at + 1)
                     }
-                    DecodeError::InvalidLength(_) => "it has the wrong length; it may be cut short",
-                    DecodeError::InvalidPadding => "the `=` padding at its end is wrong or missing",
+                    DecodeError::InvalidLength(_) => {
+                        "it has the wrong length; it may be cut short".into()
+                    }
+                    DecodeError::InvalidPadding => {
+                        "the `=` padding at its end is wrong or missing".into()
+                    }
                 };
                 Err(Error::InvalidKey(format!(
                     "{ENV_SIGN} is not valid base64: {why}"
@@ -203,10 +207,10 @@ mod tests {
 
     /// The decoder's own error quotes a byte of the input and its offset. The two low bits of
     /// the last symbol are always zero, so a one-bit typo there gives away the real key
-    /// character. Each kind of error gets a fixed text that says what is wrong without
-    /// quoting the key (invariant 6). The text names the variable: a roster's public signing
-    /// key fails with "signing key ..." texts, so a bare "signing key" sends the user to
-    /// `keys.json` instead of to their own identity.
+    /// character. Each kind of error gets a fixed text that says what is wrong, and where,
+    /// without quoting the key (invariant 6). The text names the variable: a roster's public
+    /// signing key fails with "signing key ..." texts, so a bare "signing key" sends the user
+    /// to `keys.json` instead of to their own identity.
     #[test]
     fn a_malformed_signing_key_is_named_and_not_quoted() {
         let id = Identity::generate().unwrap();
@@ -218,15 +222,15 @@ mod tests {
             // Offset 42 is the last data symbol; `B` (value 1) sets a low bit there.
             (
                 format!("{}B{}", &sign[..42], &sign[43..]),
-                invalid("a character is wrong"),
+                invalid("character 43 is wrong"),
             ),
             (
                 format!("{}!{}", &sign[..10], &sign[11..]),
-                invalid("a character is wrong"),
+                invalid("character 11 is wrong"),
             ),
             (
                 format!("{}={}", &sign[..10], &sign[11..]),
-                invalid("a character is wrong"),
+                invalid("character 11 is wrong"),
             ),
             // Cut short: without the trailing `=`, and with one symbol in the last quad.
             (

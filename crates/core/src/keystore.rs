@@ -313,7 +313,7 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(text.as_bytes()).unwrap();
         let vars = [(ENV_ENC, enc.as_str()), (ENV_SIGN, bad.as_str())];
-        let why = format!("{ENV_SIGN} is not valid base64: a character is wrong");
+        let why = format!("{ENV_SIGN} is not valid base64: character 43 is wrong");
 
         for (err, origin) in [
             (

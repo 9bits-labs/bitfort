@@ -53,6 +53,8 @@ impl Identity {
         // in a heap block of its own and frees it unwiped when the key fails part way. The
         // decoder's own message quotes a byte of the key, so each kind of error gets a fixed
         // text instead, with the position of the bad character counted from 1 (invariant 6).
+        let invalid =
+            |why: &str| Error::InvalidKey(format!("{ENV_SIGN} is not valid base64: {why}"));
         let mut seed = Zeroizing::new([0u8; 32]);
         match B64.decode_slice(sign.trim(), seed.as_mut_slice()) {
             Ok(32) => Ok(Self {
@@ -62,21 +64,14 @@ impl Identity {
             Ok(_) | Err(DecodeSliceError::OutputSliceTooSmall) => Err(Error::InvalidKey(format!(
                 "{ENV_SIGN} must decode to 32 bytes"
             ))),
-            Err(DecodeSliceError::DecodeError(e)) => {
-                let why = match e {
-                    DecodeError::InvalidByte(at, _) | DecodeError::InvalidLastSymbol(at, _) => {
-                        format!("character {} is wrong", at + 1)
-                    }
-                    DecodeError::InvalidLength(_) => {
-                        "it has the wrong length; it may be cut short".into()
-                    }
-                    DecodeError::InvalidPadding => {
-                        "the `=` padding at its end is wrong or missing".into()
-                    }
-                };
-                Err(Error::InvalidKey(format!(
-                    "{ENV_SIGN} is not valid base64: {why}"
-                )))
+            Err(DecodeSliceError::DecodeError(
+                DecodeError::InvalidByte(at, _) | DecodeError::InvalidLastSymbol(at, _),
+            )) => Err(invalid(&format!("character {} is wrong", at + 1))),
+            Err(DecodeSliceError::DecodeError(DecodeError::InvalidLength(_))) => {
+                Err(invalid("it has the wrong length; it may be cut short"))
+            }
+            Err(DecodeSliceError::DecodeError(DecodeError::InvalidPadding)) => {
+                Err(invalid("the `=` padding at its end is wrong or missing"))
             }
         }
     }

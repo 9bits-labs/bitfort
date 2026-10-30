@@ -3,24 +3,31 @@
 //! `dealloc` is a plaintext copy that nobody wiped.
 //!
 //! Each test uses its own marker, so tests that run in parallel cannot report each other.
-//! A reallocation goes to the system allocator unsearched. A block that moves leaves its old
-//! copy behind, which `Zeroizing` does not cover and these tests do not measure; `age` does
-//! this when it shrinks each decrypted chunk. The values here are built at their final size.
+//! A reallocation is not searched. A block that moves leaves its old copy behind, which
+//! `Zeroizing` does not cover and these tests do not measure; `age` does this when it shrinks
+//! each decrypted chunk. The values here are built at their final size.
+//!
+//! Every block is wiped once it is searched, and the old block of a reallocation once it is
+//! copied, as the `bitfort` binary's allocator does. The search reads a block to its full size,
+//! so without the wipe a copy freed earlier turns up in bytes a later block never wrote.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;
+use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use base64::Engine;
 use bitfort_core::{dotenv, Chain, Identity, Member, Role, Roster, Vault};
+use zeroize::Zeroize;
 
 const SELF_CHECK: &[u8] = b"zeroize-check-0b5e";
+const STALE: &[u8] = b"zeroize-stale-4a17";
 const PARSE: &[u8] = b"zeroize-parse-7f3a";
 const SET: &[u8] = b"zeroize-set-91c2";
 const VAULT: &[u8] = b"zeroize-vault-5d81";
 const DECRYPT: &[u8] = b"zeroize-decrypt-e6a0";
 const SIGN: &[u8] = b"zeroize-sign-3c4d";
-const MARKERS: [&[u8]; 6] = [SELF_CHECK, PARSE, SET, VAULT, DECRYPT, SIGN];
+const MARKERS: [&[u8]; 7] = [SELF_CHECK, STALE, PARSE, SET, VAULT, DECRYPT, SIGN];
 
 static SEEN: [AtomicBool; MARKERS.len()] = [const { AtomicBool::new(false) }; MARKERS.len()];
 
@@ -38,12 +45,28 @@ unsafe impl GlobalAlloc for Watch {
                 seen.store(true, Ordering::SeqCst);
             }
         }
+        unsafe { wipe(ptr, layout) };
         unsafe { System.dealloc(ptr, layout) }
     }
 
+    // Not `System.realloc`, which can move the block and free the old copy unwiped.
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        unsafe { System.realloc(ptr, layout, new_size) }
+        let new_layout = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
+        let moved = unsafe { System.alloc(new_layout) };
+        if !moved.is_null() {
+            unsafe { std::ptr::copy_nonoverlapping(ptr, moved, layout.size().min(new_size)) };
+            unsafe { wipe(ptr, layout) };
+            unsafe { System.dealloc(ptr, layout) };
+        }
+        moved
     }
+}
+
+/// Clear a block before it is freed. `MaybeUninit`, because part of the block may never have
+/// been written; `zeroize` writes volatile, so the compiler cannot drop the wipe as a dead store.
+unsafe fn wipe(ptr: *mut u8, layout: Layout) {
+    unsafe { std::slice::from_raw_parts_mut(ptr.cast::<MaybeUninit<u8>>(), layout.size()) }
+        .zeroize();
 }
 
 #[global_allocator]
@@ -60,6 +83,25 @@ fn seen(marker: &[u8]) -> &'static AtomicBool {
 fn the_allocator_sees_a_string_freed_unwiped() {
     drop(String::from("zeroize-check-0b5e"));
     assert!(seen(SELF_CHECK).load(Ordering::SeqCst));
+}
+
+/// A block that reuses freed memory and never writes it does not report what the memory held
+/// before. Without the wipe it did: on Linux, `decrypt` freed a block from `age`'s header
+/// parser that still held a value `encrypt` had freed, and the decrypt test failed.
+///
+/// The marker sits past the start of the block, where the system allocator keeps its free-list
+/// links and would overwrite it.
+#[test]
+fn a_block_does_not_report_a_copy_freed_before_it() {
+    let mut first = Vec::with_capacity(64);
+    first.resize(32, 0);
+    first.extend_from_slice(STALE);
+    drop(std::hint::black_box(first));
+    assert!(seen(STALE).swap(false, Ordering::SeqCst));
+
+    let second: Vec<u8> = Vec::with_capacity(64);
+    drop(std::hint::black_box(second));
+    assert!(!seen(STALE).load(Ordering::SeqCst));
 }
 
 /// An identity file's keys go through `parse` as well as a `.env`. Each value is wiped when

@@ -1445,7 +1445,12 @@ enum VaultState {
     WrongAudience(String),
     /// The file is missing or damaged - not a key problem.
     Unreadable(String),
+    /// No identity source is configured, or the keyring cannot be reached.
     NoIdentity,
+    /// A configured identity source does not load. Carries its error, which names the variable,
+    /// the identity file or the keyring entry to fix. Like [`VaultState::NoIdentity`], it says
+    /// nothing about the file, so `verify` reports the vault as not checked.
+    IdentityUnusable(String),
     NoRoster,
 }
 
@@ -1457,8 +1462,12 @@ impl VaultState {
         let Some(verified) = roster else {
             return Self::NoRoster;
         };
-        let Ok(identity) = keystore::load_identity() else {
-            return Self::NoIdentity;
+        let identity = match keystore::find_identity() {
+            Ok(Some(identity)) => identity,
+            // A keyring that cannot be reached is the usual state of a CI runner with no
+            // identity: the reviewer on a fresh clone (docs/SPEC.md §3.1, §5.5).
+            Ok(None) | Err(bitfort_core::Error::Keyring(_)) => return Self::NoIdentity,
+            Err(e) => return Self::IdentityUnusable(e.to_string()),
         };
         match project.load_vault(env, &identity, verified) {
             Ok(vault) => {
@@ -1554,6 +1563,12 @@ impl VaultState {
                 Level::Warn,
                 "locked - no local identity (run `bitfort keygen`)".to_string(),
             ),
+            // Not `Fail`: `verify` prints a failing line as FAILED, and this state is not
+            // checked.
+            Self::IdentityUnusable(why) => (
+                Level::Warn,
+                format!("locked - the local identity does not load: {why}"),
+            ),
             Self::NoRoster => (
                 Level::Info,
                 "not read - the roster does not verify, so the vault cannot be authenticated"
@@ -1584,6 +1599,9 @@ impl VaultState {
             ),
             Self::Drifted(Drift::Ahead { .. }) => Some(
                 "keys.json is older than the vault - check out `.bitfort` whole, at one revision, so the roster, the chain and the vault come from the same commit",
+            ),
+            Self::IdentityUnusable(_) => Some(
+                "the local identity does not load - fix the identity source the vault line names; `run` and `get` fail until then",
             ),
             // Nothing to fix, or nothing this readout can fix: a missing local identity and an
             // unverified roster are already reported by their own lines.
@@ -1628,6 +1646,9 @@ impl VaultState {
                 json!({ "unlocked": false, "reason": "unreadable", "error": why })
             }
             Self::NoIdentity => json!({ "unlocked": false, "reason": "no-identity" }),
+            Self::IdentityUnusable(why) => {
+                json!({ "unlocked": false, "reason": "identity-unusable", "error": why })
+            }
             Self::NoRoster => json!({ "unlocked": false, "reason": "unverified-roster" }),
         }
     }

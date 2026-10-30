@@ -485,8 +485,11 @@ unavailable in a shallow clone or outside a repository; the chain lives in `chai
   in either direction, or one that is missing or damaged. It is the gate CI runs on a pull
   request, so it must see what `run` would refuse - on the diff that introduced it, not at
   deploy time. Only two cases are reported
-  as *not checked* rather than failed: no local identity, and an identity that holds no seat in
-  this environment. A reviewer comparing the anchor on a fresh clone is in the first.
+  as *not checked* rather than failed: no usable local identity, and an identity that holds no
+  seat in this environment. A reviewer comparing the anchor on a fresh clone is in the first.
+  So is a machine whose configured identity source does not load (a malformed key, half a pair,
+  an unreadable identity file); `status` and `verify` show that source's error, not the advice
+  to run `keygen`, because `keygen` fails on the same source.
   `--strict` narrows to one extra meaning: **anti-rollback must be enforceable here**, so it also
   fails outside a git repository and in a shallow clone. CI runs `verify --strict`.
 

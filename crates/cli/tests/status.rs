@@ -144,6 +144,34 @@ fn status_names_the_real_cause_when_identity_cannot_decrypt() {
 }
 
 #[test]
+fn status_names_a_failing_identity_source() {
+    // Regression: a configured identity source that fails is not "no local identity", and
+    // `keygen` does not fix it. `verify` still exits 0 and reports the vault as not checked,
+    // the same as with no identity (docs/SPEC.md §5.5).
+    let f = init_project();
+    let sign = f.id.sign_secret();
+    let bad = format!("{}!{}", &sign[..10], &sign[11..]);
+    let why = "BITFORT_SIGN_IDENTITY is not valid base64: character 11 is wrong";
+    let run = |args: &[&str]| {
+        bf(f.dir.path(), &f.id)
+            .env("BITFORT_SIGN_IDENTITY", &bad)
+            .args(args)
+            .assert()
+            .success()
+    };
+    run(&["status"])
+        .stdout(predicate::str::contains(why))
+        .stdout(predicate::str::contains(
+            "the local identity does not load - fix",
+        ))
+        .stdout(predicate::str::contains("keygen").not());
+    run(&["--json", "status"])
+        .stdout(predicate::str::contains("\"identity-unusable\""))
+        .stdout(predicate::str::contains(why));
+    run(&["verify"]).stdout(predicate::str::contains(why));
+}
+
+#[test]
 fn status_names_who_last_wrote_the_vault() {
     // The vault's signature lives inside the ciphertext, where no diff shows it. `status`
     // is where a reviewer sees who signed the payload they are about to trust.

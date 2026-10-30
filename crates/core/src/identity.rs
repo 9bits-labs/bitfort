@@ -7,7 +7,7 @@
 //! copies of key material in freed heap memory.
 
 use age::secrecy::ExposeSecret;
-use base64::{DecodeError, Engine};
+use base64::{DecodeError, DecodeSliceError, Engine};
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
@@ -49,27 +49,32 @@ impl Identity {
             .parse()
             .map_err(|e: &str| Error::InvalidKey(format!("{ENV_ENC}: {e}")))?;
 
-        // Zeroizing so the decoded secret is scrubbed on every exit path, including the
-        // length-mismatch error below. The decoder's own message quotes a byte of the key and
-        // its offset, so each kind of error gets a fixed text instead (invariant 6).
-        let bytes = Zeroizing::new(B64.decode(sign.trim()).map_err(|e| {
-            let why = match e {
-                DecodeError::InvalidByte(..) | DecodeError::InvalidLastSymbol(..) => {
-                    "a character is wrong"
-                }
-                DecodeError::InvalidLength(_) => "it has the wrong length; it may be cut short",
-                DecodeError::InvalidPadding => "the `=` padding at its end is wrong or missing",
-            };
-            Error::InvalidKey(format!("{ENV_SIGN} is not valid base64: {why}"))
-        })?);
-        let mut seed: [u8; 32] = bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| Error::InvalidKey(format!("{ENV_SIGN} must decode to 32 bytes")))?;
-        let sign = SigningKey::from_bytes(&seed);
-        seed.zeroize();
-
-        Ok(Self { enc, sign })
+        // Decoded into a stack buffer that is wiped on every exit path. `decode` puts the seed
+        // in a heap block of its own and frees it unwiped when the key fails part way. The
+        // decoder's own message quotes a byte of the key and its offset, so each kind of error
+        // gets a fixed text instead (invariant 6).
+        let mut seed = Zeroizing::new([0u8; 32]);
+        match B64.decode_slice(sign.trim(), seed.as_mut_slice()) {
+            Ok(32) => Ok(Self {
+                enc,
+                sign: SigningKey::from_bytes(&seed),
+            }),
+            Ok(_) | Err(DecodeSliceError::OutputSliceTooSmall) => Err(Error::InvalidKey(format!(
+                "{ENV_SIGN} must decode to 32 bytes"
+            ))),
+            Err(DecodeSliceError::DecodeError(e)) => {
+                let why = match e {
+                    DecodeError::InvalidByte(..) | DecodeError::InvalidLastSymbol(..) => {
+                        "a character is wrong"
+                    }
+                    DecodeError::InvalidLength(_) => "it has the wrong length; it may be cut short",
+                    DecodeError::InvalidPadding => "the `=` padding at its end is wrong or missing",
+                };
+                Err(Error::InvalidKey(format!(
+                    "{ENV_SIGN} is not valid base64: {why}"
+                )))
+            }
+        }
     }
 
     /// The `age` recipient used to encrypt vaults to this identity.
@@ -208,6 +213,7 @@ mod tests {
         let (enc, sign) = (id.enc_secret(), id.sign_secret());
         let invalid =
             |why: &str| format!("invalid key material: {ENV_SIGN} is not valid base64: {why}");
+        let wrong_size = format!("invalid key material: {ENV_SIGN} must decode to 32 bytes");
         let cases = [
             // Offset 42 is the last data symbol; `B` (value 1) sets a low bit there.
             (
@@ -216,6 +222,10 @@ mod tests {
             ),
             (
                 format!("{}!{}", &sign[..10], &sign[11..]),
+                invalid("a character is wrong"),
+            ),
+            (
+                format!("{}={}", &sign[..10], &sign[11..]),
                 invalid("a character is wrong"),
             ),
             // Cut short: without the trailing `=`, and with one symbol in the last quad.
@@ -228,10 +238,12 @@ mod tests {
                 invalid("it has the wrong length; it may be cut short"),
             ),
             // Well-formed base64 of the wrong length, rejected (and zeroized) after decoding.
-            (
-                "QQ==".to_string(),
-                format!("invalid key material: {ENV_SIGN} must decode to 32 bytes"),
-            ),
+            ("QQ==".to_string(), wrong_size.clone()),
+            // Too long: refused before the decoder writes past the 32-byte buffer, also when
+            // the extra characters make the padding or the length wrong.
+            (format!("{}A", sign.as_str()), wrong_size.clone()),
+            (format!("{}AA", &sign[..43]), wrong_size.clone()),
+            (format!("{}AAAA", &sign[..43]), wrong_size),
         ];
         for (bad, expected) in cases {
             let err = Identity::from_secret_strings(&enc, &bad).err().unwrap();

@@ -11,6 +11,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use base64::Engine;
 use bitfort_core::{dotenv, Chain, Identity, Member, Role, Roster, Vault};
 
 const SELF_CHECK: &[u8] = b"zeroize-check-0b5e";
@@ -18,15 +19,10 @@ const PARSE: &[u8] = b"zeroize-parse-7f3a";
 const SET: &[u8] = b"zeroize-set-91c2";
 const VAULT: &[u8] = b"zeroize-vault-5d81";
 const DECRYPT: &[u8] = b"zeroize-decrypt-e6a0";
-const MARKERS: [&[u8]; 5] = [SELF_CHECK, PARSE, SET, VAULT, DECRYPT];
+const SIGN: &[u8] = b"zeroize-sign-3c4d";
+const MARKERS: [&[u8]; 6] = [SELF_CHECK, PARSE, SET, VAULT, DECRYPT, SIGN];
 
-static SEEN: [AtomicBool; 5] = [
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-];
+static SEEN: [AtomicBool; MARKERS.len()] = [const { AtomicBool::new(false) }; MARKERS.len()];
 
 struct Watch;
 
@@ -130,4 +126,20 @@ fn decrypt_wipes_a_payload_it_refuses() {
     let refused = Vault::decrypt(&armored, &alice, &roster, &Chain::new(), "production");
     assert!(refused.is_err());
     assert!(!seen(DECRYPT).load(Ordering::SeqCst));
+}
+
+/// A signing key is decoded into a buffer that is wiped on every exit path. A key with a
+/// wrong last symbol is refused after the decoder has written the first 30 bytes of the seed.
+#[test]
+fn a_signing_key_leaves_no_copy_of_its_seed() {
+    let mut seed = [0u8; 32];
+    seed[..SIGN.len()].copy_from_slice(SIGN);
+    let sign = base64::engine::general_purpose::STANDARD.encode(seed);
+    // The last data symbol is `A` (value 0); `B` sets one of its low bits.
+    let bad = format!("{}B{}", &sign[..42], &sign[43..]);
+    let enc = Identity::generate().unwrap().enc_secret();
+
+    drop(Identity::from_secret_strings(&enc, &sign).unwrap());
+    assert!(Identity::from_secret_strings(&enc, &bad).is_err());
+    assert!(!seen(SIGN).load(Ordering::SeqCst));
 }

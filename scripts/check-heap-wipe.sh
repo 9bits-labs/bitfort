@@ -57,6 +57,7 @@ watch() {
     printf 'ok    %-20s %s frees\n' "$label" "$frees"
   else
     printf 'FAIL  %-20s%s\n' "$label" "$problems" >&2
+    grep -v '^FREEWATCH ' <<<"$report" | sed 's/^/      /' >&2 || true
     failed=1
   fi
 }

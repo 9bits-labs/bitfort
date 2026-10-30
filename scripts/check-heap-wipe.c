@@ -28,6 +28,9 @@ static int nibble(char c) {
 }
 
 __attribute__((constructor)) static void setup(void) {
+  // Only `bitfort` is watched. A child of `run` would inherit the variable, and where SIP does
+  // not strip it from a system binary, dyld aborts that arm64e child: this library is arm64.
+  unsetenv("DYLD_INSERT_LIBRARIES");
   const char *hex = getenv("FREEWATCH_HEX");
   while (hex && *hex && count < MAX_MARKERS) {
     size_t n = 0;

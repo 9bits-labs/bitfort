@@ -5,8 +5,10 @@ use thiserror::Error;
 /// Errors produced by the crypto, roster, and vault engine.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// Not `#[from]`: that also makes the i/o error the source, and the message already prints
+    /// it, so a printer that walks the cause chain showed it twice. [`From`] is below.
     #[error("i/o error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
 
     #[error("random source failed: {0}")]
     Random(String),
@@ -100,6 +102,12 @@ pub(crate) fn check_schema(kind: &'static str, found: u32, supported: u32) -> Re
     Ok(())
 }
 
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
 impl Error {
     pub(crate) fn encrypt(e: impl std::fmt::Display) -> Self {
         Self::Encrypt(e.to_string())
@@ -114,3 +122,16 @@ impl Error {
 
 /// Convenience alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The message carries the i/o error, so the error has no source to print it again.
+    #[test]
+    fn an_io_error_prints_its_cause_once() {
+        let err = Error::from(std::io::Error::other("gone"));
+        assert_eq!(err.to_string(), "i/o error: gone");
+        assert!(std::error::Error::source(&err).is_none());
+    }
+}

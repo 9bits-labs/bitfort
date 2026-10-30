@@ -190,7 +190,7 @@ pub fn keygen(ui: &Ui, name: Option<String>) -> Result<()> {
     let name = resolve_name(name);
     // Refuse here so a rejected name never reaches an invite blob.
     bitfort_core::roster::validate_member_name(&name)?;
-    let (identity, created) = match keystore::find_identity()? {
+    let (identity, created) = match find_identity()? {
         Some(id) => (id, false),
         None => {
             let id = Identity::generate()?;
@@ -1969,35 +1969,41 @@ fn discover(start: Option<&Path>) -> Result<bitfort_core::Project> {
 }
 
 /// Load the identity for read/write paths, adding a hint about the headless path when
-/// none is configured (docs/SPEC.md §3.1).
+/// none is configured (docs/SPEC.md §3.1). Only then: a configured source that fails reports
+/// its own error, and `keygen` would fail on that source too.
 fn load_identity() -> Result<Identity> {
-    keystore::load_identity().map_err(|e| {
+    find_identity()?.ok_or_else(|| {
         Failure::hinted(
-            format!(
-                "no identity available: {e}\nA local key is needed here; in CI/headless set \
-                 BITFORT_IDENTITY and BITFORT_SIGN_IDENTITY."
-            ),
+            "no identity available\nA local key is needed here; in CI/headless set \
+             BITFORT_IDENTITY and BITFORT_SIGN_IDENTITY.",
             "bitfort keygen",
         )
     })
 }
 
 /// Adopt the existing identity if one is configured, else generate and store a new one.
-/// A keyring backend failure (e.g. no Secret Service on a headless box) is surfaced with
-/// the headless-path hint rather than a raw error (docs/SPEC.md §3.1).
 fn acquire_identity() -> Result<Identity> {
-    match keystore::find_identity() {
-        Ok(Some(id)) => Ok(id),
-        Ok(None) => {
+    match find_identity()? {
+        Some(id) => Ok(id),
+        None => {
             let id = Identity::generate()?;
             keystore::store_identity(&id)?;
             Ok(id)
         }
-        Err(e) => Err(anyhow!(
+    }
+}
+
+/// [`keystore::find_identity`], with a keyring backend failure (e.g. no Secret Service on a
+/// headless box) surfaced with the headless-path hint rather than a raw error (docs/SPEC.md
+/// §3.1). Any other error comes from a configured source and names it, so it passes as is.
+fn find_identity() -> Result<Option<Identity>> {
+    keystore::find_identity().map_err(|e| match e {
+        bitfort_core::Error::Keyring(_) => anyhow!(
             "{e}\nNo usable identity source. On a headless box set BITFORT_IDENTITY and \
              BITFORT_SIGN_IDENTITY; on a dev machine ensure the OS keyring is available."
-        )),
-    }
+        ),
+        e => e.into(),
+    })
 }
 
 /// Verify the target env's roster and confirm the local identity is a maintainer in it -

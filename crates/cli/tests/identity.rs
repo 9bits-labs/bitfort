@@ -426,76 +426,40 @@ fn a_lone_signing_identity_is_refused_before_the_keyring() {
     }
 }
 
-/// A configured identity source that fails reports its own error, which names the variable or
-/// the file to fix. "no identity available" and `try bitfort keygen` fit only a machine where
-/// no source is configured: here `keygen` fails on the same source.
+/// A configured identity source that fails reports its own error once, and the error names the
+/// variable or the file to fix. "no identity available" and `try bitfort keygen` fit only a
+/// machine where no source is configured: here `keygen` fails on the same source. Every failing
+/// source takes the same path, and the keystore tests check each message. The missing file is
+/// the case whose error printed its cause twice.
 ///
-/// Every case fails before the keyring, so the test never reaches it.
+/// Both cases fail before the keyring, so the test never reaches it.
 #[test]
 fn a_failing_identity_source_is_not_reported_as_no_identity() {
     let f = init_project();
     let sign = f.id.sign_secret();
-    let bad_sign = format!("{}!{}", &sign[..10], &sign[11..]);
-    let open_file = f.dir.path().join("ci.key");
-    std::fs::write(
-        &open_file,
-        format!(
-            "BITFORT_IDENTITY={}\nBITFORT_SIGN_IDENTITY={}\n",
-            f.id.enc_secret().as_str(),
-            sign.as_str()
-        ),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&open_file, std::fs::Permissions::from_mode(0o644)).unwrap();
-    }
-    let missing_file = f.dir.path().join("missing.key");
-    // The pair unset, so the file is the configured source.
-    let only_file = |file: &std::path::Path| {
-        vec![
-            ("BITFORT_IDENTITY", None),
-            ("BITFORT_SIGN_IDENTITY", None),
-            ("BITFORT_IDENTITY_FILE", Some(file.display().to_string())),
-        ]
-    };
+    let missing = f.dir.path().join("missing.key");
+    let mut bad_key = bf(f.dir.path(), &f.id);
+    bad_key.env(
+        "BITFORT_SIGN_IDENTITY",
+        format!("{}!{}", &sign[..10], &sign[11..]),
+    );
+    let mut bad_file = bf(f.dir.path(), &f.id);
+    bad_file
+        .env_remove("BITFORT_IDENTITY")
+        .env_remove("BITFORT_SIGN_IDENTITY")
+        .env("BITFORT_IDENTITY_FILE", &missing);
 
-    let mut cases = vec![
+    for (mut cmd, expected) in [
         (
-            vec![("BITFORT_SIGN_IDENTITY", Some(bad_sign))],
+            bad_key,
             "BITFORT_SIGN_IDENTITY is not valid base64: character 11 is wrong".to_string(),
         ),
-        (
-            vec![("BITFORT_SIGN_IDENTITY", None)],
-            "BITFORT_SIGN_IDENTITY must be set when BITFORT_IDENTITY is set".to_string(),
-        ),
-        (
-            only_file(&missing_file),
-            format!("identity file {}: ", missing_file.display()),
-        ),
-    ];
-    #[cfg(unix)]
-    cases.push((
-        only_file(&open_file),
-        format!(
-            "identity file {} is group/world accessible",
-            open_file.display()
-        ),
-    ));
-
-    for (vars, expected) in cases {
-        let mut cmd = bf(f.dir.path(), &f.id);
-        for (var, value) in vars {
-            match value {
-                Some(value) => cmd.env(var, value),
-                None => cmd.env_remove(var),
-            };
-        }
+        (bad_file, format!("identity file {}: ", missing.display())),
+    ] {
         cmd.args(["get", "API_KEY"])
             .assert()
             .failure()
-            .stderr(predicate::str::contains(expected))
+            .stderr(predicate::str::contains(expected).count(1))
             .stderr(predicate::str::contains("no identity available").not())
             .stderr(predicate::str::contains("keygen").not());
     }

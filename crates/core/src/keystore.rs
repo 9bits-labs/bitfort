@@ -20,6 +20,8 @@ pub const ENV_ENC: &str = "BITFORT_IDENTITY";
 pub const ENV_SIGN: &str = "BITFORT_SIGN_IDENTITY";
 /// Path to a file containing the two variables above.
 pub const ENV_FILE: &str = "BITFORT_IDENTITY_FILE";
+/// Every variable the env sources read. `run` removes them from the child.
+pub const IDENTITY_VARS: [&str; 3] = [ENV_ENC, ENV_SIGN, ENV_FILE];
 
 /// Keyring service name. The local identity is stored as a single item under one
 /// account (both secrets together), so loading it costs one keychain access - and, on
@@ -37,7 +39,7 @@ pub fn find_identity() -> Result<Option<Identity>> {
     if let Some(identity) = identity_from_env(|var| std::env::var_os(var))? {
         return Ok(Some(identity));
     }
-    match keyring_get_opt(IDENTITY_ACCOUNT)? {
+    match keyring_get(IDENTITY_ACCOUNT)? {
         None => Ok(None),
         // Wrap the returned blob so the plaintext secrets it holds are zeroized on drop.
         Some(blob) => build_identity(&Zeroizing::new(blob)).map(Some),
@@ -50,9 +52,14 @@ pub fn find_identity() -> Result<Option<Identity>> {
 /// Half a pair is an error, whichever half it is, and it is raised before the file is read, so
 /// the stray half is never ignored in favor of another source.
 ///
+/// An empty variable counts as unset. A CI platform gives a job that may not read its secrets
+/// an empty string (on GitHub Actions, a pull request from a fork), and that job has no
+/// identity, not a broken one: `verify --strict` fails on a broken one (docs/SPEC.md §3.1).
+///
 /// `var` reads one variable: `std::env::var_os` in use, a fixed list in the tests, so the
 /// rules are tested without changing the process environment and without the keyring.
 fn identity_from_env(var: impl Fn(&str) -> Option<OsString>) -> Result<Option<Identity>> {
+    let var = |name: &str| var(name).filter(|value| !value.is_empty());
     // `var_os` so a present-but-non-UTF-8 value is a clear error instead of silently
     // falling through to a different source (security review #3).
     let secret = |raw: OsString, var: &str| {
@@ -78,13 +85,27 @@ fn identity_from_env(var: impl Fn(&str) -> Option<OsString>) -> Result<Option<Id
     }
 }
 
+/// The variables of [`IDENTITY_VARS`] that are set to an empty string, which
+/// [`identity_from_env`] counts as unset. The CLI names them in its advice to set the
+/// variables, so that advice does not read as already followed.
+pub fn empty_identity_vars() -> Vec<&'static str> {
+    empty_vars(|var| std::env::var_os(var))
+}
+
+/// [`empty_identity_vars`] over `var`, the reader [`identity_from_env`] takes.
+fn empty_vars(var: impl Fn(&str) -> Option<OsString>) -> Vec<&'static str> {
+    IDENTITY_VARS
+        .into_iter()
+        .filter(|name| var(name).is_some_and(|value| value.is_empty()))
+        .collect()
+}
+
 /// Load an identity from a `BITFORT_IDENTITY_FILE`-style file.
 pub fn load_identity_file(path: &Path) -> Result<Identity> {
-    let origin = format!("identity file {}", path.display());
-    // The OS error alone does not say which file, and the variable that named it is not in
-    // the message.
-    let unreadable =
-        |e: std::io::Error| Error::Io(std::io::Error::new(e.kind(), format!("{origin}: {e}")));
+    // Quoted: the path comes from the environment, and the message goes to a terminal.
+    let shown = dotenv::quoted_path(path);
+    let origin = format!("identity file {shown}");
+    let unreadable = |e| Error::file("read identity file", path, e);
     // Refuse group/world-accessible key files, ssh/gpg-style (security review #5).
     #[cfg(unix)]
     {
@@ -95,9 +116,8 @@ pub fn load_identity_file(path: &Path) -> Result<Identity> {
             .mode();
         if mode & 0o077 != 0 {
             return Err(Error::InvalidKey(format!(
-                "{origin} is group/world accessible (mode {:o}); run: chmod 600 {}",
+                "{origin} is group/world accessible (mode {:o}); run: chmod 600 {shown}",
                 mode & 0o777,
-                path.display()
             )));
         }
     }
@@ -147,7 +167,14 @@ pub fn store_identity(identity: &Identity) -> Result<()> {
 /// Rebuild an identity from a stored blob, reusing the identity-file parser so the
 /// serialization format lives in exactly one place.
 fn build_identity(blob: &str) -> Result<Identity> {
-    identity_from_text(blob, "the keyring entry")
+    identity_from_text(blob, &keyring_origin())
+}
+
+/// Where a key error from the keyring item was read. It names the item: no bitfort command
+/// removes a damaged one (`keygen` fails on it too), so the user removes it with the OS
+/// keyring tool and needs the service and the account to find it.
+fn keyring_origin() -> String {
+    format!("the keyring entry (service \"{KEYRING_SERVICE}\", account \"{IDENTITY_ACCOUNT}\")")
 }
 
 /// Serialize both secrets into one blob (the identity-file format). Zeroized on drop so
@@ -182,12 +209,25 @@ fn keyring_set(account: &str, secret: &str) -> Result<()> {
 }
 
 /// Fetch a keyring entry, mapping a genuinely-absent entry to `Ok(None)` while still
-/// surfacing backend failures (locked keyring, no Secret Service) as errors.
-fn keyring_get_opt(account: &str) -> Result<Option<String>> {
+/// surfacing failures as errors (see [`keyring_read_error`]).
+fn keyring_get(account: &str) -> Result<Option<String>> {
     match entry(account)?.get_password() {
         Ok(secret) => Ok(Some(secret)),
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(Error::Keyring(e.to_string())),
+        Err(e) => Err(keyring_read_error(e)),
+    }
+}
+
+/// The error for a failed keyring read. A backend failure (locked keyring, no Secret Service)
+/// is [`Error::Keyring`], which callers read as "the keyring cannot be used". An entry that
+/// exists but does not load is a configured source that is broken, like a malformed key, so it
+/// names the entry instead: `keygen` cannot fix it, and `verify --strict` fails on it.
+fn keyring_read_error(e: keyring::Error) -> Error {
+    match e {
+        keyring::Error::BadEncoding(_)
+        | keyring::Error::BadDataFormat(..)
+        | keyring::Error::Ambiguous(_) => Error::InvalidKey(format!("{}: {e}", keyring_origin())),
+        e => Error::Keyring(e.to_string()),
     }
 }
 
@@ -238,7 +278,10 @@ mod tests {
             let err = build_identity(&contents).err().unwrap();
             assert_eq!(
                 err.to_string(),
-                format!("invalid key material: the keyring entry: {missing} is missing")
+                format!(
+                    "invalid key material: {}: {missing} is missing",
+                    keyring_origin()
+                )
             );
         }
     }
@@ -294,6 +337,39 @@ mod tests {
         assert!(identity_from_env(lookup(&[])).unwrap().is_none());
     }
 
+    /// An empty variable counts as unset: a fork's pull request gets empty secrets, and that
+    /// job has no identity, not a broken one. Half a pair is still refused when the other
+    /// half is empty.
+    #[test]
+    fn an_empty_variable_counts_as_unset() {
+        let id = Identity::generate().unwrap();
+        let enc = id.enc_secret();
+        let empty = [(ENV_ENC, ""), (ENV_SIGN, ""), (ENV_FILE, "")];
+        assert!(identity_from_env(lookup(&empty)).unwrap().is_none());
+        assert_eq!(empty_vars(lookup(&empty)), IDENTITY_VARS);
+
+        let half = [(ENV_ENC, enc.as_str()), (ENV_SIGN, "")];
+        let err = identity_from_env(lookup(&half)).err().unwrap().to_string();
+        assert!(err.contains(&format!("{ENV_SIGN} must be set")), "{err}");
+        assert_eq!(empty_vars(lookup(&half)), [ENV_SIGN]);
+        assert!(empty_vars(lookup(&[])).is_empty());
+    }
+
+    /// An entry that exists but does not load is a broken source, not a keyring that cannot be
+    /// used: the CLI treats [`Error::Keyring`] as the second, and passes `verify --strict` on it.
+    /// The error names the service and the account, because the user removes the item by hand.
+    #[test]
+    fn an_unreadable_keyring_entry_is_not_a_keyring_failure() {
+        let err = keyring_read_error(keyring::Error::BadEncoding(vec![0xff]));
+        assert_eq!(
+            err.to_string(),
+            "invalid key material: the keyring entry (service \"bitfort\", account \"identity\"): \
+             Password data is not valid UTF-8"
+        );
+        let err = keyring_read_error(keyring::Error::NoStorageAccess("locked".into()));
+        assert!(matches!(err, Error::Keyring(_)), "{err:?}");
+    }
+
     /// A malformed signing key reaches the user from each source with the variable's name
     /// and, for a file or the keyring entry, where it was read. Each message is compared in
     /// full, so a wrapper that adds the value or the decoder's own text fails here
@@ -317,11 +393,11 @@ mod tests {
             ),
             (
                 load_identity_file(file.path()).err().unwrap(),
-                format!("identity file {}: ", file.path().display()),
+                format!("identity file \"{}\": ", file.path().display()),
             ),
             (
                 build_identity(&text).err().unwrap(),
-                "the keyring entry: ".into(),
+                format!("{}: ", keyring_origin()),
             ),
         ] {
             assert_eq!(
@@ -349,17 +425,38 @@ mod tests {
     }
 
     /// A file that cannot be read names itself. The OS error says only "No such file or
-    /// directory", and the variable that named the file is not in the message.
+    /// directory", and the variable that named the file is not in the message. The OS error
+    /// itself is kept, not copied into a string.
     #[test]
     fn a_missing_identity_file_names_itself() {
         let err = load_identity_file(Path::new("/nonexistent/bitfort/id"))
             .err()
-            .unwrap()
-            .to_string();
+            .unwrap();
         assert!(
-            err.starts_with("i/o error: identity file /nonexistent/bitfort/id: "),
+            matches!(&err, Error::File { error, .. } if error.kind() == std::io::ErrorKind::NotFound),
+            "{err:?}"
+        );
+        let err = err.to_string();
+        assert!(
+            err.starts_with("cannot read identity file \"/nonexistent/bitfort/id\": "),
             "{err}"
         );
+    }
+
+    /// A control character in the path is escaped in the key errors too, not only in the read
+    /// error [`Error::File`] prints, so a path from the environment cannot drive the terminal
+    /// that prints the error.
+    #[cfg(unix)]
+    #[test]
+    fn an_identity_file_path_is_escaped_in_its_key_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x\x1b[31m.key");
+        std::fs::write(&path, "").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = load_identity_file(&path).err().unwrap().to_string();
+        assert!(!err.contains('\x1b'), "{err:?}");
+        assert!(err.contains(r"x\x1b[31m.key"), "{err:?}");
     }
 
     #[cfg(unix)]
@@ -404,7 +501,7 @@ mod tests {
     #[ignore]
     fn keyring_roundtrip() {
         // The keyring alone: `find_identity` would take an identity from the environment.
-        let stored = || build_identity(&keyring_get_opt(IDENTITY_ACCOUNT).unwrap().unwrap());
+        let stored = || build_identity(&keyring_get(IDENTITY_ACCOUNT).unwrap().unwrap());
         let id = Identity::generate().unwrap();
         store_identity(&id).unwrap();
         assert_eq!(stored().unwrap().anchor(), id.anchor());
@@ -415,6 +512,6 @@ mod tests {
         assert_eq!(stored().unwrap().enc_pubkey(), rotated.enc_pubkey());
 
         delete_identity().unwrap();
-        assert!(keyring_get_opt(IDENTITY_ACCOUNT).unwrap().is_none());
+        assert!(keyring_get(IDENTITY_ACCOUNT).unwrap().is_none());
     }
 }

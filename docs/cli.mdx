@@ -149,6 +149,14 @@ anti-rollback. Prints the trust anchor for out-of-band comparison.
 `--strict` exits non-zero on any failure, including a protection that could only be applied on
 a best-effort basis, such as anti-rollback in a shallow clone. Use it in CI.
 
+The vault signature needs a local identity to check. With no identity, `verify` reports the
+vault as not checked, and `--strict` still passes. An identity that is configured but does not
+load is different: a malformed `BITFORT_SIGN_IDENTITY`, half of the pair, an identity file
+that cannot be read, or a damaged keyring entry. `--strict` fails on it, because in CI it is a
+broken secret. An empty
+variable counts as unset, so a CI job that gets empty secrets, such as a pull request from a
+fork, has no identity and passes.
+
 ### `bitfort anchor`
 
 Print the trust anchor as hex and as a six-word phrase, to publish outside the repository.

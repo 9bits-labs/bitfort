@@ -510,8 +510,8 @@ pub fn set(
 /// match, anti-rollback) and print the anchor fingerprint for out-of-band comparison
 /// (docs/SPEC.md §5.1). A hard failure (bad chain, rollback, tampering) always exits
 /// non-zero. `--strict` additionally fails on best-effort conditions - chiefly running
-/// outside a git repo, where anti-rollback and the chain cannot be enforced - so CI can
-/// demand full protection (§5.5).
+/// outside a git repo, where anti-rollback and the chain cannot be enforced - and on a
+/// configured identity source that does not load, so CI can demand full protection (§5.5).
 pub fn verify(ui: &Ui, start: Option<&Path>, env: Option<&str>, strict: bool) -> Result<i32> {
     let opened = open(start, env)?;
     let (project, env, config) = (&opened.project, opened.env.as_str(), &opened.config);
@@ -524,10 +524,14 @@ pub fn verify(ui: &Ui, start: Option<&Path>, env: Option<&str>, strict: bool) ->
     // signature now, and a forged one must be visible on the diff that introduced it, not
     // only later at `run`.
     let vault = VaultState::read(project, env, verified.as_ref().ok());
+    let identity_fails_strict = strict && vault.fails_strict();
     // A hard verification failure exits 1, and so does a vault this roster did not authorize.
     // `--strict` adds the case where anti-rollback cannot be enforced (no repository, or a
-    // shallow clone). This holds across every output mode.
-    let code = i32::from(verified.is_err() || vault.is_failure() || (strict && !enforced));
+    // shallow clone), and a vault left unchecked by an identity source that does not load.
+    // This holds across every output mode.
+    let code = i32::from(
+        verified.is_err() || vault.is_failure() || (strict && !enforced) || identity_fails_strict,
+    );
 
     if ui.json() {
         let mut obj = json!({
@@ -572,6 +576,9 @@ pub fn verify(ui: &Ui, start: Option<&Path>, env: Option<&str>, strict: bool) ->
             (Level::Fail, why) => eprintln!("FAILED: {why}"),
             (_, msg) => outln!("vault: {msg}")?,
         }
+        if identity_fails_strict {
+            eprintln!("FAILED: --strict requires a local identity that loads");
+        }
         if let Some(why) = guard.and_then(|g| g.warning()) {
             eprintln!("warning: {why}");
             if strict {
@@ -604,6 +611,13 @@ pub fn verify(ui: &Ui, start: Option<&Path>, env: Option<&str>, strict: bool) ->
     }
     let (level, msg) = vault.line();
     ui.status(level, "vault", &msg)?;
+    if identity_fails_strict {
+        ui.status(
+            Level::Fail,
+            "strict",
+            "requires a local identity that loads",
+        )?;
+    }
     // The chain verified from `chain.json`. Anti-rollback is the one part that still needs
     // git history, so it is the one part that can be unavailable.
     if let Some(why) = guard.and_then(|g| g.warning()) {
@@ -1067,12 +1081,18 @@ pub fn member_list(ui: &Ui, start: Option<&Path>, env: Option<&str>) -> Result<(
     let env = opened.env.as_str();
     let verified = opened.verified("list members")?;
     let roster = &verified.roster;
-
-    if ui.json() {
-        let me = keystore::find_identity()
+    // Mark the local identity, when one is available, without failing the listing if not. Only
+    // the two listings that mark it call this, not the piped one: a keyring read can raise a
+    // macOS prompt.
+    let find_me = || {
+        keystore::find_identity()
             .ok()
             .flatten()
-            .map(|id| id.sign_pubkey());
+            .map(|id| id.sign_pubkey())
+    };
+
+    if ui.json() {
+        let me = find_me();
         let members: Vec<_> = roster
             .members
             .iter()
@@ -1123,11 +1143,7 @@ pub fn member_list(ui: &Ui, start: Option<&Path>, env: Option<&str>) -> Result<(
         rw = ROLE_W
     )))?;
 
-    // Mark the local identity, when one is available, without failing the listing if not.
-    let me = keystore::find_identity()
-        .ok()
-        .flatten()
-        .map(|id| id.sign_pubkey());
+    let me = find_me();
     for m in &roster.members {
         let is_me = me.as_ref().is_some_and(|k| *k == m.sign_pubkey);
         // The table goes to a real terminal, where nothing strips an escape byte, so the
@@ -1444,11 +1460,21 @@ enum VaultState {
     WrongAudience(String),
     /// The file is missing or damaged - not a key problem.
     Unreadable(String),
-    /// No identity source is configured, or the keyring cannot be reached.
+    /// No identity source is configured.
     NoIdentity,
+    /// No env source is configured, and the OS keyring cannot be reached: the usual state of a
+    /// CI runner with no identity, the reviewer on a fresh clone (docs/SPEC.md §3.1, §5.5).
+    /// Carries the keyring error, and the env-source variables that are set but empty (see
+    /// [`set_env_advice`]). Kept apart from [`VaultState::NoIdentity`] because `keygen` stores
+    /// into the same keyring, so advising it sends the user to a second failure.
+    NoKeyring {
+        why: String,
+        empty: Vec<&'static str>,
+    },
     /// A configured identity source does not load. Carries its error, which names the variable,
     /// the identity file or the keyring entry to fix. Like [`VaultState::NoIdentity`], it says
-    /// nothing about the file, so `verify` reports the vault as not checked.
+    /// nothing about the file, so `verify` reports the vault as not checked, and
+    /// `verify --strict` fails: in CI it is a broken secret, not a reviewer with no identity.
     IdentityUnusable(String),
     NoRoster,
 }
@@ -1461,12 +1487,12 @@ impl VaultState {
         let Some(verified) = roster else {
             return Self::NoRoster;
         };
-        let identity = match keystore::find_identity() {
-            Ok(Some(identity)) => identity,
-            // A keyring that cannot be reached is the usual state of a CI runner with no
-            // identity: the reviewer on a fresh clone (docs/SPEC.md §3.1, §5.5).
-            Ok(None) | Err(bitfort_core::Error::Keyring(_)) => return Self::NoIdentity,
-            Err(e) => return Self::IdentityUnusable(e.to_string()),
+        let identity = match Self::classify_identity(
+            keystore::find_identity(),
+            keystore::empty_identity_vars(),
+        ) {
+            Ok(identity) => identity,
+            Err(state) => return state,
         };
         match project.load_vault(env, &identity, verified) {
             Ok(vault) => {
@@ -1495,6 +1521,23 @@ impl VaultState {
         }
     }
 
+    /// The identity [`keystore::find_identity`] found, or the state that says why there is
+    /// none. `empty` is what [`keystore::empty_identity_vars`] returned for the same lookup.
+    fn classify_identity(
+        found: bitfort_core::Result<Option<Identity>>,
+        empty: Vec<&'static str>,
+    ) -> std::result::Result<Identity, Self> {
+        match found {
+            Ok(Some(identity)) => Ok(identity),
+            Ok(None) => Err(Self::NoIdentity),
+            Err(e @ bitfort_core::Error::Keyring(_)) => Err(Self::NoKeyring {
+                why: e.to_string(),
+                empty,
+            }),
+            Err(e) => Err(Self::IdentityUnusable(e.to_string())),
+        }
+    }
+
     /// Whether this state must fail `verify`. The gate reports exactly what the read paths
     /// would refuse, so every drifted vault counts: both directions are refused now.
     fn is_failure(&self) -> bool {
@@ -1506,6 +1549,14 @@ impl VaultState {
                 | Self::ProcessControl(_)
                 | Self::Drifted(Drift::Behind { .. } | Drift::Ahead { .. })
         )
+    }
+
+    /// Whether this state must fail `verify --strict` only. The vault is not checked, and the
+    /// cause is a configured identity source that does not load, so the gate would pass a
+    /// vault it never authenticated. No source at all is the reviewer with no identity, and
+    /// passes.
+    fn fails_strict(&self) -> bool {
+        matches!(self, Self::IdentityUnusable(_))
     }
 
     /// The one-line readout: severity and message, shared by `status` and `verify`.
@@ -1562,8 +1613,15 @@ impl VaultState {
                 Level::Warn,
                 "locked - no local identity (run `bitfort keygen`)".to_string(),
             ),
+            Self::NoKeyring { why, empty } => (
+                Level::Warn,
+                format!(
+                    "locked - no local identity: {why} ({})",
+                    no_keyring_advice(empty)
+                ),
+            ),
             // Not `Fail`: `verify` prints a failing line as FAILED, and this state is not
-            // checked.
+            // checked. `verify --strict` adds its own failing line (see `fails_strict`).
             Self::IdentityUnusable(why) => (
                 Level::Warn,
                 format!("locked - the local identity does not load: {why}"),
@@ -1605,7 +1663,7 @@ impl VaultState {
             // Nothing to fix, or nothing this readout can fix: a missing local identity and an
             // unverified roster are already reported by their own lines.
             Self::Unlocked { .. } | Self::Drifted(Drift::Current) => None,
-            Self::Locked | Self::NoIdentity | Self::NoRoster => None,
+            Self::Locked | Self::NoIdentity | Self::NoKeyring { .. } | Self::NoRoster => None,
         }
     }
 
@@ -1645,6 +1703,9 @@ impl VaultState {
                 json!({ "unlocked": false, "reason": "unreadable", "error": why })
             }
             Self::NoIdentity => json!({ "unlocked": false, "reason": "no-identity" }),
+            Self::NoKeyring { why, .. } => {
+                json!({ "unlocked": false, "reason": "no-keyring", "error": why })
+            }
             Self::IdentityUnusable(why) => {
                 json!({ "unlocked": false, "reason": "identity-unusable", "error": why })
             }
@@ -1992,10 +2053,12 @@ fn discover(start: Option<&Path>) -> Result<bitfort_core::Project> {
 /// none is configured (docs/SPEC.md §3.1). Only then: a configured source that fails reports
 /// its own error, and `keygen` would fail on that source too.
 fn load_identity() -> Result<Identity> {
-    find_identity()?.ok_or_else(|| {
+    find_identity_hinted()?.ok_or_else(|| {
         Failure::hinted(
-            "no identity available\nA local key is needed here; in CI/headless set \
-             BITFORT_IDENTITY and BITFORT_SIGN_IDENTITY.",
+            format!(
+                "no identity available\nA local key is needed here; in CI/headless {}.",
+                set_env_advice(&keystore::empty_identity_vars())
+            ),
             "bitfort keygen",
         )
     })
@@ -2004,7 +2067,7 @@ fn load_identity() -> Result<Identity> {
 /// Adopt the existing identity if one is configured, else generate and store a new one.
 /// The flag says whether it was generated.
 fn acquire_identity() -> Result<(Identity, bool)> {
-    match find_identity()? {
+    match find_identity_hinted()? {
         Some(id) => Ok((id, false)),
         None => {
             let id = Identity::generate()?;
@@ -2017,14 +2080,38 @@ fn acquire_identity() -> Result<(Identity, bool)> {
 /// [`keystore::find_identity`], with a keyring backend failure (e.g. no Secret Service on a
 /// headless box) surfaced with the headless-path hint rather than a raw error (docs/SPEC.md
 /// §3.1). Any other error comes from a configured source and names it, so it passes as is.
-fn find_identity() -> Result<Option<Identity>> {
+/// [`VaultState::classify_identity`] sorts the same errors for the vault line.
+fn find_identity_hinted() -> Result<Option<Identity>> {
     keystore::find_identity().map_err(|e| match e {
         bitfort_core::Error::Keyring(_) => anyhow!(
-            "{e}\nNo usable identity source. On a headless box set BITFORT_IDENTITY and \
-             BITFORT_SIGN_IDENTITY; on a dev machine ensure the OS keyring is available."
+            "{e}\nNo usable identity source: {}.",
+            no_keyring_advice(&keystore::empty_identity_vars())
         ),
         e => e.into(),
     })
+}
+
+/// What to do when no env source is configured and the OS keyring cannot be used. One text, so
+/// the vault line and the error of the read and write paths give the same advice.
+fn no_keyring_advice(empty: &[&str]) -> String {
+    format!(
+        "on a headless box {}; on a dev machine make the OS keyring available",
+        set_env_advice(empty)
+    )
+}
+
+/// The advice to set the env source. `empty` names the variables that are set to an empty
+/// string, which counts as unset (docs/SPEC.md §3.1). A CI job from a fork gets its secrets
+/// that way, and advice to set variables that its log shows as set reads as already followed.
+fn set_env_advice(empty: &[&str]) -> String {
+    let advice = format!("set {} and {}", keystore::ENV_ENC, keystore::ENV_SIGN);
+    if empty.is_empty() {
+        return advice;
+    }
+    format!(
+        "{advice} (an empty variable counts as unset, and these are empty: {})",
+        empty.join(", ")
+    )
 }
 
 /// Verify the target env's roster and confirm the local identity is a maintainer in it -
@@ -2222,5 +2309,56 @@ fn warn_oversized(vault: &Vault) {
             "warning: {key} exceeds {} KiB; oversized values can exceed OS env limits at spawn",
             VALUE_SIZE_WARN / 1024
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each way the identity lookup gives no identity, as the vault line shows it. Only a
+    /// machine with no source at all is told to run `keygen`: `keygen` stores into the keyring,
+    /// so it fails where the keyring cannot be reached, and a source that does not load needs
+    /// its own fix. Only that last state fails `verify --strict`. The e2e suite never reaches
+    /// the keyring, so these branches are checked here.
+    #[test]
+    fn only_a_machine_with_no_identity_source_is_told_to_run_keygen() {
+        let state = |found, empty| VaultState::classify_identity(found, empty).err().unwrap();
+
+        let none = state(Ok(None), vec![]);
+        assert!(none.line().1.contains("run `bitfort keygen`"));
+        assert!(!none.fails_strict());
+
+        let no_keyring = || Err(bitfort_core::Error::Keyring("no Secret Service".into()));
+        let keyring = state(no_keyring(), vec![]);
+        let (_, line) = keyring.line();
+        assert!(line.contains("keyring error: no Secret Service"), "{line}");
+        assert!(line.contains("BITFORT_IDENTITY"), "{line}");
+        assert!(!line.contains("keygen"), "{line}");
+        assert!(!line.contains("empty"), "{line}");
+        assert_eq!(keyring.json()["reason"], "no-keyring");
+        assert!(!keyring.fails_strict());
+
+        // The variables the advice says to set are set, but empty: the advice says so.
+        let empty = state(no_keyring(), vec![keystore::ENV_ENC, keystore::ENV_SIGN]);
+        let (_, line) = empty.line();
+        assert!(
+            line.contains("these are empty: BITFORT_IDENTITY, BITFORT_SIGN_IDENTITY)"),
+            "{line}"
+        );
+
+        let broken = state(
+            Err(bitfort_core::Error::InvalidKey(
+                "BITFORT_SIGN_IDENTITY is not valid base64".into(),
+            )),
+            vec![],
+        );
+        let (_, line) = broken.line();
+        assert!(
+            line.contains("BITFORT_SIGN_IDENTITY is not valid base64"),
+            "{line}"
+        );
+        assert!(!line.contains("keygen"), "{line}");
+        assert!(broken.fails_strict());
     }
 }

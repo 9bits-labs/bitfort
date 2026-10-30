@@ -145,23 +145,26 @@ impl Staged {
         // vault or roster write land outside the project.
         let mut options = std::fs::File::options();
         options.write(true).create_new(true);
-        let mut f = options.open(&tmp)?;
+        let mut f = options
+            .open(&tmp)
+            .map_err(|e| Error::file("create", &tmp, e))?;
         // Constructed only once the file exists, so a `Staged` never owns - and never deletes -
         // a path this process did not create.
         let staged = Self {
             tmp,
             target: target.to_path_buf(),
         };
-        f.write_all(contents)?;
-        f.sync_all()?;
+        f.write_all(contents)
+            .and_then(|()| f.sync_all())
+            .map_err(|e| Error::file("write", &staged.tmp, e))?;
         Ok(staged)
     }
 
     /// Rename the staged file over its target. A reader sees either the old bytes or the
     /// complete new ones, never a truncated file.
     fn publish(self) -> Result<()> {
-        std::fs::rename(&self.tmp, &self.target)?;
-        Ok(())
+        std::fs::rename(&self.tmp, &self.target)
+            .map_err(|e| Error::file("replace", &self.target, e))
     }
 }
 
@@ -389,7 +392,7 @@ impl Project {
     pub fn discover(start: &Path) -> Result<Self> {
         let start = start
             .canonicalize()
-            .map_err(|e| Error::Project(format!("cannot resolve {}: {e}", start.display())))?;
+            .map_err(|e| Error::file("resolve", start, e))?;
         for dir in start.ancestors() {
             if dir.join(DIR_NAME).is_dir() {
                 return Ok(Self {
@@ -428,7 +431,8 @@ impl Project {
         // the guard above then refuses every retry with "already exists", and nothing tells
         // the user to delete it. So it is removed on any failure here.
         let build = || -> Result<()> {
-            std::fs::create_dir_all(project.root.join(DIR_NAME).join(ENVIRONMENTS))?;
+            let dir = project.bitfort_dir().join(ENVIRONMENTS);
+            std::fs::create_dir_all(&dir).map_err(|e| Error::file("create", &dir, e))?;
             project.save_config(config)
         };
         if let Err(e) = build() {
@@ -522,20 +526,24 @@ impl Project {
     /// correct state for an environment still at roster v1; [`Chain::verify`] rejects an
     /// empty chain for any higher version, so this cannot be used to skip the walk.
     pub fn load_chain(&self, env: &str) -> Result<Chain> {
-        match std::fs::read(self.chain_path(env)) {
+        let path = self.chain_path(env);
+        match std::fs::read(&path) {
             Ok(bytes) => Chain::from_json(&bytes),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Chain::new()),
-            Err(e) => Err(Error::Project(format!(
-                "cannot read {}: {e}",
-                self.chain_path(env).display()
-            ))),
+            Err(e) => Err(Error::file("read", &path, e)),
         }
     }
 
     /// Write an environment's roster chain as pretty JSON (stable, diff-friendly).
     pub fn save_chain(&self, env: &str, chain: &Chain) -> Result<()> {
-        std::fs::create_dir_all(self.env_dir(env))?;
+        self.create_env_dir(env)?;
         write_atomic(&self.chain_path(env), pretty_json(chain)?.as_bytes())
+    }
+
+    /// Create an environment's directory, and its parents, if they do not exist.
+    fn create_env_dir(&self, env: &str) -> Result<()> {
+        let dir = self.env_dir(env);
+        std::fs::create_dir_all(&dir).map_err(|e| Error::file("create", &dir, e))
     }
 
     /// The chain with `superseded` recorded as a predecessor, or `None` when it is already
@@ -582,7 +590,7 @@ impl Project {
         vault: &Vault,
         identity: &Identity,
     ) -> Result<()> {
-        std::fs::create_dir_all(self.env_dir(env))?;
+        self.create_env_dir(env)?;
         let armored = vault_bytes(vault, next, identity)?;
 
         let mut staged = Vec::with_capacity(3);
@@ -624,7 +632,8 @@ impl Project {
 
     /// Load and parse `config.toml`.
     pub fn load_config(&self) -> Result<Config> {
-        let text = std::fs::read_to_string(self.config_path())?;
+        let path = self.config_path();
+        let text = std::fs::read_to_string(&path).map_err(|e| Error::file("read", &path, e))?;
         Config::from_toml(&text)
     }
 
@@ -649,13 +658,14 @@ impl Project {
 
     /// Load and parse an environment's roster.
     pub fn load_roster(&self, env: &str) -> Result<Roster> {
-        let bytes = std::fs::read(self.roster_path(env))?;
+        let path = self.roster_path(env);
+        let bytes = std::fs::read(&path).map_err(|e| Error::file("read", &path, e))?;
         Roster::from_json(&bytes)
     }
 
     /// Write an environment's roster as pretty JSON (stable, diff-friendly).
     pub fn save_roster(&self, env: &str, roster: &Roster) -> Result<()> {
-        std::fs::create_dir_all(self.env_dir(env))?;
+        self.create_env_dir(env)?;
         write_atomic(&self.roster_path(env), pretty_json(roster)?.as_bytes())
     }
 
@@ -670,8 +680,7 @@ impl Project {
         let path = self.vault_path(env);
         // Name the file: a bare `No such file or directory` from `set`/`rotate`/`import`
         // gives the user nothing to act on.
-        let armored = std::fs::read_to_string(&path)
-            .map_err(|e| Error::Project(format!("cannot read {}: {e}", path.display())))?;
+        let armored = std::fs::read_to_string(&path).map_err(|e| Error::file("read", &path, e))?;
         Vault::decrypt(&armored, identity, &verified.roster, &verified.chain, env)
     }
 
@@ -738,13 +747,11 @@ impl Project {
     /// "the merge this file came from is gone". It answers `false` for a missing file, since
     /// a vault that is not there carries nothing.
     pub fn vault_has_conflict_markers(&self, env: &str) -> Result<bool> {
-        match std::fs::read_to_string(self.vault_path(env)) {
+        let path = self.vault_path(env);
+        match std::fs::read_to_string(&path) {
             Ok(text) => Ok(crate::resolve::has_conflict_markers(&text)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(Error::Project(format!(
-                "cannot read {}: {e}",
-                self.vault_path(env).display()
-            ))),
+            Err(e) => Err(Error::file("read", &path, e)),
         }
     }
 
@@ -762,7 +769,7 @@ impl Project {
         roster: &Roster,
         identity: &Identity,
     ) -> Result<()> {
-        std::fs::create_dir_all(self.env_dir(env))?;
+        self.create_env_dir(env)?;
         let armored = vault_bytes(vault, roster, identity)?;
         write_atomic(&self.vault_path(env), armored.as_bytes())
     }

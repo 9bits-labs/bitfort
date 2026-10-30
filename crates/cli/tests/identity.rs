@@ -454,7 +454,10 @@ fn a_failing_identity_source_is_not_reported_as_no_identity() {
             bad_key,
             "BITFORT_SIGN_IDENTITY is not valid base64: character 11 is wrong".to_string(),
         ),
-        (bad_file, format!("identity file {}: ", missing.display())),
+        (
+            bad_file,
+            format!("cannot read identity file \"{}\": ", missing.display()),
+        ),
     ] {
         cmd.args(["get", "API_KEY"])
             .assert()
@@ -463,4 +466,25 @@ fn a_failing_identity_source_is_not_reported_as_no_identity() {
             .stderr(predicate::str::contains("no identity available").not())
             .stderr(predicate::str::contains("keygen").not());
     }
+}
+
+/// Regression: an identity file path that is not UTF-8 was shown with U+FFFD in place of the
+/// byte, so the error named a file that does not exist. The byte is now written as `\xNN`.
+/// The read fails before the keyring.
+#[cfg(unix)]
+#[test]
+fn an_identity_file_path_that_is_not_utf8_is_shown_byte_for_byte() {
+    use std::os::unix::ffi::OsStrExt;
+    let f = init_project();
+    let mut path = f.dir.path().as_os_str().to_owned();
+    path.push(std::ffi::OsStr::from_bytes(b"/\xff.key"));
+    bf(f.dir.path(), &f.id)
+        .env_remove("BITFORT_IDENTITY")
+        .env_remove("BITFORT_SIGN_IDENTITY")
+        .env("BITFORT_IDENTITY_FILE", &path)
+        .args(["get", "API_KEY"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(r#"/\xff.key": "#))
+        .stderr(predicate::str::contains('\u{fffd}').not());
 }

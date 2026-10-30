@@ -136,8 +136,8 @@ fn parse_identity_file(
             _ => {}
         }
     }
-    let enc = enc.ok_or_else(|| Error::InvalidKey(format!("{ENV_ENC} missing in {origin}")))?;
-    let sign = sign.ok_or_else(|| Error::InvalidKey(format!("{ENV_SIGN} missing in {origin}")))?;
+    let enc = enc.ok_or_else(|| Error::InvalidKey(format!("{origin}: {ENV_ENC} is missing")))?;
+    let sign = sign.ok_or_else(|| Error::InvalidKey(format!("{origin}: {ENV_SIGN} is missing")))?;
     Ok((enc, sign))
 }
 
@@ -241,11 +241,24 @@ mod tests {
         assert_eq!(sign.as_str(), id.sign_secret().as_str());
     }
 
+    /// A missing key starts with where the text was read, the same as a bad line and a
+    /// malformed key do.
     #[test]
-    fn identity_file_missing_sign_is_rejected() {
+    fn a_missing_key_error_starts_with_its_origin() {
         let id = Identity::generate().unwrap();
-        let contents = format!("{ENV_ENC}={}\n", id.enc_secret().as_str());
-        assert!(parse_identity_file(&contents, "identity file").is_err());
+        let (enc, sign) = (id.enc_secret(), id.sign_secret());
+        for (contents, missing) in [
+            (format!("{ENV_ENC}={}\n", enc.as_str()), ENV_SIGN),
+            (format!("{ENV_SIGN}={}\n", sign.as_str()), ENV_ENC),
+        ] {
+            let err = parse_identity_file(&contents, "the keyring entry")
+                .err()
+                .unwrap();
+            assert_eq!(
+                err.to_string(),
+                format!("invalid key material: the keyring entry: {missing} is missing")
+            );
+        }
     }
 
     /// A bad line names the file and the line. The parser's own error gives only the line,

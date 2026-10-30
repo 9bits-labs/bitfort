@@ -2,7 +2,7 @@
 
 Commit your secrets, encrypted.
 
-BitFort encrypts your `.env` into a file only your team's keys can open. You commit that file.
+BitFort™ encrypts your `.env` into a file only your team's keys can open. You commit that file.
 BitFort decrypts it when you run your app, so no plaintext copy is ever stored.
 
 ```bash
@@ -58,3 +58,5 @@ the on-disk format, never against the crates.
 ## Licence
 
 Apache-2.0. See [`LICENSE`](LICENSE).
+
+BitFort is a trademark of 9bits LLC.

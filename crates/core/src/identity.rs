@@ -53,6 +53,10 @@ impl Identity {
         // in a heap block of its own and frees it unwiped when the key fails part way. The
         // decoder's own message quotes a byte of the key, so each kind of error gets a fixed
         // text instead, with the position of the bad character counted from 1 (invariant 6).
+        // The decoder counts bytes from the end of the leading whitespace that `trim` removes,
+        // and the user counts characters from the start of the value. Every byte before the
+        // bad one is a base64 symbol, so only the whitespace can hold a multi-byte character.
+        let lead = sign.chars().take_while(|c| c.is_whitespace()).count();
         let invalid =
             |why: &str| Error::InvalidKey(format!("{ENV_SIGN} is not valid base64: {why}"));
         let mut seed = Zeroizing::new([0u8; 32]);
@@ -66,7 +70,7 @@ impl Identity {
             ))),
             Err(DecodeSliceError::DecodeError(
                 DecodeError::InvalidByte(at, _) | DecodeError::InvalidLastSymbol(at, _),
-            )) => Err(invalid(&format!("character {} is wrong", at + 1))),
+            )) => Err(invalid(&format!("character {} is wrong", lead + at + 1))),
             Err(DecodeSliceError::DecodeError(DecodeError::InvalidLength(_))) => {
                 Err(invalid("it has the wrong length; it may be cut short"))
             }
@@ -226,6 +230,11 @@ mod tests {
             (
                 format!("{}={}", &sign[..10], &sign[11..]),
                 invalid("character 11 is wrong"),
+            ),
+            // Leading whitespace counts, in characters: a no-break space is two bytes.
+            (
+                format!("\u{a0} {}!{}", &sign[..10], &sign[11..]),
+                invalid("character 13 is wrong"),
             ),
             // Cut short: without the trailing `=`, and with one symbol in the last quad.
             (

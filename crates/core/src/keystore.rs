@@ -89,22 +89,29 @@ fn identity_from_env(var: impl Fn(&str) -> Option<OsString>) -> Result<Option<Id
 
 /// Load an identity from a `BITFORT_IDENTITY_FILE`-style file.
 pub fn load_identity_file(path: &Path) -> Result<Identity> {
+    let origin = format!("identity file {}", path.display());
+    // The OS error alone does not say which file, and the variable that named it is not in
+    // the message.
+    let unreadable =
+        |e: std::io::Error| Error::Io(std::io::Error::new(e.kind(), format!("{origin}: {e}")));
     // Refuse group/world-accessible key files, ssh/gpg-style (security review #5).
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(path)?.permissions().mode();
+        let mode = std::fs::metadata(path)
+            .map_err(unreadable)?
+            .permissions()
+            .mode();
         if mode & 0o077 != 0 {
             return Err(Error::InvalidKey(format!(
-                "identity file {} is group/world accessible (mode {:o}); run: chmod 600 {}",
-                path.display(),
+                "{origin} is group/world accessible (mode {:o}); run: chmod 600 {}",
                 mode & 0o777,
                 path.display()
             )));
         }
     }
-    let contents = Zeroizing::new(std::fs::read_to_string(path)?);
-    identity_from_text(&contents, &format!("identity file {}", path.display()))
+    let contents = Zeroizing::new(std::fs::read_to_string(path).map_err(unreadable)?);
+    identity_from_text(&contents, &origin)
 }
 
 /// Build an identity from the text of an identity file or a keyring entry. Every key error
@@ -362,9 +369,18 @@ mod tests {
         assert_eq!(loaded.anchor(), id.anchor());
     }
 
+    /// A file that cannot be read names itself. The OS error says only "No such file or
+    /// directory", and the variable that named the file is not in the message.
     #[test]
-    fn missing_identity_file_errors() {
-        assert!(load_identity_file(Path::new("/nonexistent/bitfort/id")).is_err());
+    fn a_missing_identity_file_names_itself() {
+        let err = load_identity_file(Path::new("/nonexistent/bitfort/id"))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            err.starts_with("i/o error: identity file /nonexistent/bitfort/id: "),
+            "{err}"
+        );
     }
 
     #[cfg(unix)]

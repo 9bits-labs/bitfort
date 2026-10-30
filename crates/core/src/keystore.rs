@@ -107,28 +107,26 @@ pub fn load_identity_file(path: &Path) -> Result<Identity> {
     identity_from_text(&contents, &format!("identity file {}", path.display()))
 }
 
-/// Build an identity from the text of an identity file or a keyring entry. A key error starts
-/// with `origin`: the variable it names is not set in the environment, so the name alone
-/// would send the user to the wrong place.
+/// Build an identity from the text of an identity file or a keyring entry. Every key error
+/// starts with `origin`: a parse error alone gives only a line number, and the variable a key
+/// error names is not set in the environment, so the name alone would send the user to the
+/// wrong place.
 fn identity_from_text(contents: &str, origin: &str) -> Result<Identity> {
-    let (enc, sign) = parse_identity_file(contents, origin)?;
-    Identity::from_secret_strings(&enc, &sign).map_err(|e| match e {
-        Error::InvalidKey(m) => Error::InvalidKey(format!("{origin}: {m}")),
-        e => e,
-    })
+    parse_identity_file(contents)
+        .and_then(|(enc, sign)| Identity::from_secret_strings(&enc, &sign))
+        .map_err(|e| match e {
+            Error::InvalidKey(m) => Error::InvalidKey(format!("{origin}: {m}")),
+            e => e,
+        })
 }
 
 /// Parse the two key variables out of a dotenv-style identity file, with the parser `import`
 /// uses, so a file a shell can source (`export` prefixes, single quotes) reads the same here.
-/// Unknown keys are skipped. `origin` names the text's source in an error, because a parse
-/// error alone gives only a line number.
-fn parse_identity_file(
-    contents: &str,
-    origin: &str,
-) -> Result<(Zeroizing<String>, Zeroizing<String>)> {
+/// Unknown keys are skipped.
+fn parse_identity_file(contents: &str) -> Result<(Zeroizing<String>, Zeroizing<String>)> {
     let mut enc = None;
     let mut sign = None;
-    let pairs = dotenv::parse(contents).map_err(|e| Error::InvalidKey(format!("{origin}: {e}")))?;
+    let pairs = dotenv::parse(contents).map_err(|e| Error::InvalidKey(e.to_string()))?;
     for (key, value) in pairs {
         match key.as_str() {
             ENV_ENC => enc = Some(value),
@@ -136,8 +134,8 @@ fn parse_identity_file(
             _ => {}
         }
     }
-    let enc = enc.ok_or_else(|| Error::InvalidKey(format!("{origin}: {ENV_ENC} is missing")))?;
-    let sign = sign.ok_or_else(|| Error::InvalidKey(format!("{origin}: {ENV_SIGN} is missing")))?;
+    let enc = enc.ok_or_else(|| Error::InvalidKey(format!("{ENV_ENC} is missing")))?;
+    let sign = sign.ok_or_else(|| Error::InvalidKey(format!("{ENV_SIGN} is missing")))?;
     Ok((enc, sign))
 }
 
@@ -220,7 +218,7 @@ mod tests {
             id.enc_secret().as_str(),
             id.sign_secret().as_str(),
         );
-        let (enc, sign) = parse_identity_file(&contents, "identity file").unwrap();
+        let (enc, sign) = parse_identity_file(&contents).unwrap();
         assert_eq!(enc.as_str(), id.enc_secret().as_str());
         assert_eq!(sign.as_str(), id.sign_secret().as_str());
     }
@@ -236,7 +234,7 @@ mod tests {
             id.enc_secret().as_str(),
             id.sign_secret().as_str(),
         );
-        let (enc, sign) = parse_identity_file(&contents, "identity file").unwrap();
+        let (enc, sign) = parse_identity_file(&contents).unwrap();
         assert_eq!(enc.as_str(), id.enc_secret().as_str());
         assert_eq!(sign.as_str(), id.sign_secret().as_str());
     }
@@ -251,9 +249,7 @@ mod tests {
             (format!("{ENV_ENC}={}\n", enc.as_str()), ENV_SIGN),
             (format!("{ENV_SIGN}={}\n", sign.as_str()), ENV_ENC),
         ] {
-            let err = parse_identity_file(&contents, "the keyring entry")
-                .err()
-                .unwrap();
+            let err = build_identity(&contents).err().unwrap();
             assert_eq!(
                 err.to_string(),
                 format!("invalid key material: the keyring entry: {missing} is missing")

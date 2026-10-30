@@ -53,10 +53,6 @@ impl Identity {
         // in a heap block of its own and frees it unwiped when the key fails part way. The
         // decoder's own message quotes a byte of the key, so each kind of error gets a fixed
         // text instead, with the position of the bad character counted from 1 (invariant 6).
-        // The decoder counts bytes from the end of the leading whitespace that `trim` removes,
-        // and the user counts characters from the start of the value. Every byte before the
-        // bad one is a base64 symbol, so only the whitespace can hold a multi-byte character.
-        let lead = sign.chars().take_while(|c| c.is_whitespace()).count();
         let invalid =
             |why: &str| Error::InvalidKey(format!("{ENV_SIGN} is not valid base64: {why}"));
         let mut seed = Zeroizing::new([0u8; 32]);
@@ -70,7 +66,14 @@ impl Identity {
             ))),
             Err(DecodeSliceError::DecodeError(
                 DecodeError::InvalidByte(at, _) | DecodeError::InvalidLastSymbol(at, _),
-            )) => Err(invalid(&format!("character {} is wrong", lead + at + 1))),
+            )) => {
+                // The decoder counts bytes from the end of the leading whitespace that `trim`
+                // removes, and the user counts characters from the start of the value. Every
+                // byte before the bad one is a base64 symbol, so only the whitespace can hold a
+                // multi-byte character.
+                let lead = sign.chars().take_while(|c| c.is_whitespace()).count();
+                Err(invalid(&format!("character {} is wrong", lead + at + 1)))
+            }
             Err(DecodeSliceError::DecodeError(DecodeError::InvalidLength(_))) => {
                 Err(invalid("it has the wrong length; it may be cut short"))
             }
@@ -204,12 +207,10 @@ mod tests {
         assert!(vk.verify_strict(msg, &sig).is_ok());
     }
 
-    /// The decoder's own error quotes a byte of the input and its offset. The two low bits of
-    /// the last symbol are always zero, so a one-bit typo there gives away the real key
-    /// character. Each kind of error gets a fixed text that says what is wrong, and where,
-    /// without quoting the key (invariant 6). The text names the variable: a roster's public
-    /// signing key fails with "signing key ..." texts, so a bare "signing key" sends the user
-    /// to `keys.json` instead of to their own identity.
+    /// Each kind of error gets a fixed text that names the variable and says what is wrong,
+    /// and where, without quoting the key (invariant 6). The two low bits of the last symbol
+    /// are always zero, so for the first case the decoder's own text gave away the real key
+    /// character.
     #[test]
     fn a_malformed_signing_key_is_named_and_not_quoted() {
         let id = Identity::generate().unwrap();

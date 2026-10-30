@@ -103,10 +103,14 @@ Private keys are loaded from one of two sources, resolved in this order:
 
 Notes:
 - A CI runner is supplied **both** halves of the identity. `BITFORT_IDENTITY` and
-  `BITFORT_SIGN_IDENTITY` are required together: `keystore::load_identity` errors when either is
+  `BITFORT_SIGN_IDENTITY` are required together: `keystore::find_identity` errors when either is
   set without the other, and neither half falls through to the identity file or the keyring.
   The runner still must not mutate the roster; that is enforced by giving it a
   plain member seat, not by withholding the signing key.
+- An empty variable counts as unset. A CI platform gives a job that may not read its secrets an
+  empty string (on GitHub Actions, a pull request from a fork), and that job has no identity,
+  not a broken one, so `verify --strict` reports its vault as not checked (§5.5). Half a pair is
+  still refused when the other half is empty.
 - The CI identity is a normal roster **member** with its own keypair - added via `member add`
   like any teammate, then its private key placed in the CI platform's secret store. It is not a
   shared human key. This keeps it independently revocable and rotatable (see §8).
@@ -485,10 +489,18 @@ unavailable in a shallow clone or outside a repository; the chain lives in `chai
   in either direction, or one that is missing or damaged. It is the gate CI runs on a pull
   request, so it must see what `run` would refuse - on the diff that introduced it, not at
   deploy time. Only two cases are reported
-  as *not checked* rather than failed: no local identity, and an identity that holds no seat in
-  this environment. A reviewer comparing the anchor on a fresh clone is in the first.
-  `--strict` narrows to one extra meaning: **anti-rollback must be enforceable here**, so it also
-  fails outside a git repository and in a shallow clone. CI runs `verify --strict`.
+  as *not checked* rather than failed: no usable local identity, and an identity that holds no
+  seat in this environment. A reviewer comparing the anchor on a fresh clone is in the first,
+  and so is a runner with no identity variables and no reachable OS keyring; there `status` and
+  `verify` show the keyring error, not the advice to run `keygen`, because `keygen` stores into
+  that keyring. So is a machine whose configured identity source does not load (a malformed key,
+  half a pair, an unreadable identity file); `status` and `verify` show that source's error, for
+  the same reason.
+  `--strict` adds two meanings. **Anti-rollback must be enforceable here**, so it also fails
+  outside a git repository and in a shallow clone. And **a configured identity source must
+  load**: in CI one that does not is a broken secret, and the gate would pass a vault it never
+  authenticated. No source at all still passes, empty variables included (§3.1), so a pull
+  request from a fork is the reviewer with no identity. CI runs `verify --strict`.
 
 ---
 

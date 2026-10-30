@@ -1,12 +1,23 @@
 //! Error type for `bitfort-core`.
 
+use std::path::{Path, PathBuf};
+
 use thiserror::Error;
 
 /// Errors produced by the crypto, roster, and vault engine.
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("i/o error: {0}")]
-    Io(#[from] std::io::Error),
+    /// A file or directory operation failed. Carries the path, because the OS error alone
+    /// does not say which file. The path is quoted: it can come from the environment
+    /// (`BITFORT_IDENTITY_FILE`), and the message goes to a terminal. The field is not named
+    /// `source`, which would make the i/o error the source too, and a printer that walks the
+    /// cause chain would show it twice.
+    #[error("cannot {action} {}: {error}", crate::dotenv::quoted_path(.path))]
+    File {
+        action: &'static str,
+        path: PathBuf,
+        error: std::io::Error,
+    },
 
     #[error("random source failed: {0}")]
     Random(String),
@@ -101,6 +112,14 @@ pub(crate) fn check_schema(kind: &'static str, found: u32, supported: u32) -> Re
 }
 
 impl Error {
+    /// The error for a failed operation on `path`. `action` completes "cannot ...".
+    pub(crate) fn file(action: &'static str, path: &Path, error: std::io::Error) -> Self {
+        Self::File {
+            action,
+            path: path.to_path_buf(),
+            error,
+        }
+    }
     pub(crate) fn encrypt(e: impl std::fmt::Display) -> Self {
         Self::Encrypt(e.to_string())
     }
@@ -114,3 +133,19 @@ impl Error {
 
 /// Convenience alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The message names the file and carries the i/o error, so the error has no source to
+    /// print it again. A control character in the path is escaped, not written to the
+    /// terminal.
+    #[test]
+    fn a_file_error_names_the_file_and_prints_its_cause_once() {
+        let path = Path::new("/tmp/x\x1b[31m.key");
+        let err = Error::file("read", path, std::io::Error::other("gone"));
+        assert_eq!(err.to_string(), r#"cannot read "/tmp/x\x1b[31m.key": gone"#);
+        assert!(std::error::Error::source(&err).is_none());
+    }
+}

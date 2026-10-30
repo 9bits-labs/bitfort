@@ -67,7 +67,7 @@ fn spawn(
     // environment, and without `--clean` the child inherits everything. A build step that
     // read `BITFORT_IDENTITY` would hold a key that decrypts every vault revision in git
     // history, for every environment that member belongs to (invariant 6, finding 1.5).
-    for key in [keystore::ENV_ENC, keystore::ENV_SIGN, keystore::ENV_FILE] {
+    for key in keystore::IDENTITY_VARS {
         cmd.env_remove(key);
     }
     for (key, value) in vars {

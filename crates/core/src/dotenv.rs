@@ -7,6 +7,7 @@
 //! those with `bitfort set`.
 
 use std::fmt::Write as _;
+use std::path::Path;
 
 use zeroize::Zeroizing;
 
@@ -88,14 +89,39 @@ fn render_value(value: &str) -> String {
 
 /// Double-quote `text`, escaping `\`, `"`, and every control character.
 ///
-/// Two callers with one requirement between them: it is how [`to_dotenv`] serializes a value a
-/// dotenv reader must recover, and how untrusted text - a secret's own name - is put into an
-/// error message without letting it drive the terminal that prints it. The message path always
-/// quotes rather than going through [`render_value`], so one rejected name does not read
-/// differently from the next because of its own bytes.
+/// Two uses with one requirement between them: it is how [`to_dotenv`] serializes a value a
+/// dotenv reader must recover, and how untrusted text - a secret's own name, or, through
+/// [`quoted_path`], a file path from the environment (`BITFORT_IDENTITY_FILE`) - is put into
+/// an error message without letting it drive the terminal that prints it. The message path
+/// always quotes rather than going through [`render_value`], so one rejected name does not
+/// read differently from the next because of its own bytes.
 pub(crate) fn quoted(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');
+    escape_into(&mut out, text);
+    out.push('"');
+    out
+}
+
+/// [`quoted`] for a path, which need not be UTF-8. A byte that is not part of a UTF-8
+/// character is written as `\xNN`. `to_string_lossy` would write U+FFFD in its place, and the
+/// message would name a file that does not exist.
+pub(crate) fn quoted_path(path: &Path) -> String {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let mut out = String::with_capacity(bytes.len() + 2);
+    out.push('"');
+    for chunk in bytes.utf8_chunks() {
+        escape_into(&mut out, chunk.valid());
+        for byte in chunk.invalid() {
+            let _ = write!(out, "\\x{byte:02x}");
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The body of [`quoted`]: `text` with `\`, `"`, and every control character escaped.
+fn escape_into(out: &mut String, text: &str) {
     for c in text.chars() {
         match c {
             '\\' => out.push_str("\\\\"),
@@ -103,12 +129,10 @@ pub(crate) fn quoted(text: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() => escape_control(&mut out, c),
+            c if c.is_control() => escape_control(out, c),
             _ => out.push(c),
         }
     }
-    out.push('"');
-    out
 }
 
 /// Write one control character as a dotenv escape, never as the raw byte: `\xNN` for the ASCII
@@ -497,6 +521,17 @@ WITH_HASH=abc#notacomment
         assert!(!out.contains('\0'), "raw NUL leaked: {out:?}");
         assert!(!out.contains('\u{9b}'), "raw C1 CSI leaked: {out:?}");
         assert_eq!(out, "EVIL=\"a\\x1b[2Jb\\x07\\x00\\u009b\"\n");
+    }
+
+    /// A byte that is not UTF-8 is written as `\xNN`, not as U+FFFD, so the message names the
+    /// file on disk. A UTF-8 character outside ASCII stays as it is, and a control character
+    /// is escaped as [`quoted`] escapes it.
+    #[cfg(unix)]
+    #[test]
+    fn quoted_path_keeps_a_byte_that_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = Path::new(std::ffi::OsStr::from_bytes(b"/keys/\xff\xc3\xa9\x1b.key"));
+        assert_eq!(quoted_path(path), r#""/keys/\xffé\x1b.key""#);
     }
 
     #[test]

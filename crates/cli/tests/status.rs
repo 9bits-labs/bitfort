@@ -144,6 +144,100 @@ fn status_names_the_real_cause_when_identity_cannot_decrypt() {
 }
 
 #[test]
+fn status_names_a_failing_identity_source() {
+    // Regression: a configured identity source that fails is not "no local identity", and
+    // `keygen` does not fix it. `verify` still exits 0 and reports the vault as not checked,
+    // the same as with no identity, but `verify --strict` fails: in CI this is a broken
+    // secret, and the gate would pass a vault it never authenticated (docs/SPEC.md §5.5). A git
+    // project, so that the identity is the only thing `--strict` can fail on.
+    let f = init_git_project();
+    let sign = f.id.sign_secret();
+    let bad = format!("{}!{}", &sign[..10], &sign[11..]);
+    let why = "BITFORT_SIGN_IDENTITY is not valid base64: character 11 is wrong";
+    let run = |args: &[&str]| {
+        bf(f.dir.path(), &f.id)
+            .env("BITFORT_SIGN_IDENTITY", &bad)
+            .args(args)
+            .assert()
+    };
+    run(&["status"])
+        .success()
+        .stdout(predicate::str::contains(why))
+        .stdout(predicate::str::contains(
+            "the local identity does not load - fix",
+        ))
+        .stdout(predicate::str::contains("keygen").not());
+    run(&["--json", "status"])
+        .success()
+        .stdout(predicate::str::contains("\"identity-unusable\""))
+        .stdout(predicate::str::contains(why));
+    run(&["verify"])
+        .success()
+        .stdout(predicate::str::contains(why));
+    run(&["verify", "--strict"])
+        .code(1)
+        .stdout(predicate::str::contains(why))
+        .stderr(predicate::str::contains(
+            "FAILED: --strict requires a local identity that loads",
+        ));
+    run(&["--json", "verify", "--strict"])
+        .code(1)
+        .stdout(predicate::str::contains("\"identity-unusable\""));
+}
+
+/// Regression: with no env identity and an OS keyring that cannot be reached, `status` told the
+/// user to run `bitfort keygen`, and `keygen` failed on the same keyring. The vault line now
+/// names the keyring error and the variables to set. The variables are set but empty, as a
+/// GitHub Actions job from a fork gets them, so the test also checks that an empty pair counts
+/// as no identity: the vault is not checked, and `verify --strict` passes. The advice says the
+/// variables are empty; without that it told the user to set variables that were already set.
+///
+/// macOS only: `sandbox-exec` denies the keychain to the child, so each command reaches the
+/// keyring and fails there, and the owner's keychain item is never read or written.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_unreachable_keyring_is_not_reported_as_no_identity() {
+    let f = init_git_project();
+    let home = std::env::var("HOME").unwrap();
+    let profile = format!(
+        r#"(version 1)(allow default)
+(deny mach-lookup (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd")
+  (global-name "com.apple.securityd.xpc") (global-name "com.apple.secd"))
+(deny file-read* file-write* (subpath "{home}/Library/Keychains"))"#
+    );
+    let run = |args: &[&str]| {
+        assert_cmd::Command::new("sandbox-exec")
+            .arg("-p")
+            .arg(&profile)
+            .arg(assert_cmd::cargo::cargo_bin("bitfort"))
+            .args(args)
+            .current_dir(f.dir.path())
+            .env("BITFORT_IDENTITY", "")
+            .env("BITFORT_SIGN_IDENTITY", "")
+            .env_remove("BITFORT_IDENTITY_FILE")
+            .assert()
+    };
+    let empty = "these are empty: BITFORT_IDENTITY, BITFORT_SIGN_IDENTITY)";
+    run(&["status"])
+        .success()
+        .stdout(predicate::str::contains("no local identity: keyring error"))
+        .stdout(predicate::str::contains(empty))
+        .stdout(predicate::str::contains("keygen").not());
+    run(&["--json", "status"])
+        .success()
+        .stdout(predicate::str::contains("\"no-keyring\""));
+    run(&["verify", "--strict"])
+        .success()
+        .stdout(predicate::str::contains("no local identity: keyring error"));
+    run(&["get", "API_KEY"])
+        .failure()
+        .stderr(predicate::str::contains("No usable identity source"))
+        .stderr(predicate::str::contains(empty))
+        .stderr(predicate::str::contains("no identity available").not())
+        .stderr(predicate::str::contains("keygen").not());
+}
+
+#[test]
 fn status_names_who_last_wrote_the_vault() {
     // The vault's signature lives inside the ciphertext, where no diff shows it. `status`
     // is where a reviewer sees who signed the payload they are about to trust.

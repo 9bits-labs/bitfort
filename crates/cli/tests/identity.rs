@@ -425,3 +425,66 @@ fn a_lone_signing_identity_is_refused_before_the_keyring() {
             ));
     }
 }
+
+/// A configured identity source that fails reports its own error once, and the error names the
+/// variable or the file to fix. "no identity available" and `try bitfort keygen` fit only a
+/// machine where no source is configured: here `keygen` fails on the same source. Every failing
+/// source takes the same path, and the keystore tests check each message. The missing file is
+/// the case whose error printed its cause twice.
+///
+/// Both cases fail before the keyring, so the test never reaches it.
+#[test]
+fn a_failing_identity_source_is_not_reported_as_no_identity() {
+    let f = init_project();
+    let sign = f.id.sign_secret();
+    let missing = f.dir.path().join("missing.key");
+    let mut bad_key = bf(f.dir.path(), &f.id);
+    bad_key.env(
+        "BITFORT_SIGN_IDENTITY",
+        format!("{}!{}", &sign[..10], &sign[11..]),
+    );
+    let mut bad_file = bf(f.dir.path(), &f.id);
+    bad_file
+        .env_remove("BITFORT_IDENTITY")
+        .env_remove("BITFORT_SIGN_IDENTITY")
+        .env("BITFORT_IDENTITY_FILE", &missing);
+
+    for (mut cmd, expected) in [
+        (
+            bad_key,
+            "BITFORT_SIGN_IDENTITY is not valid base64: character 11 is wrong".to_string(),
+        ),
+        (
+            bad_file,
+            format!("cannot read identity file \"{}\": ", missing.display()),
+        ),
+    ] {
+        cmd.args(["get", "API_KEY"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(expected).count(1))
+            .stderr(predicate::str::contains("no identity available").not())
+            .stderr(predicate::str::contains("keygen").not());
+    }
+}
+
+/// Regression: an identity file path that is not UTF-8 was shown with U+FFFD in place of the
+/// byte, so the error named a file that does not exist. The byte is now written as `\xNN`.
+/// The read fails before the keyring.
+#[cfg(unix)]
+#[test]
+fn an_identity_file_path_that_is_not_utf8_is_shown_byte_for_byte() {
+    use std::os::unix::ffi::OsStrExt;
+    let f = init_project();
+    let mut path = f.dir.path().as_os_str().to_owned();
+    path.push(std::ffi::OsStr::from_bytes(b"/\xff.key"));
+    bf(f.dir.path(), &f.id)
+        .env_remove("BITFORT_IDENTITY")
+        .env_remove("BITFORT_SIGN_IDENTITY")
+        .env("BITFORT_IDENTITY_FILE", &path)
+        .args(["get", "API_KEY"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(r#"/\xff.key": "#))
+        .stderr(predicate::str::contains('\u{fffd}').not());
+}

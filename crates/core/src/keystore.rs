@@ -27,11 +27,12 @@ pub const ENV_FILE: &str = "BITFORT_IDENTITY_FILE";
 pub const KEYRING_SERVICE: &str = "bitfort";
 const IDENTITY_ACCOUNT: &str = "identity";
 
-/// Like [`load_identity`], but distinguishes "no identity is configured anywhere"
-/// (`Ok(None)`) from a real failure (`Err`). Used by `init`/`keygen`, which generate a
-/// fresh identity only when none exists. A misconfigured env source (e.g. `BITFORT_IDENTITY`
-/// set but malformed, or one of the pair set without the other) is a hard error, not "none" -
-/// otherwise a typo would silently mint a second identity instead of surfacing the mistake.
+/// Load the local identity, trying each source in precedence order. `Ok(None)` means no
+/// identity is configured anywhere, and every other failure is an `Err`, so a caller can tell
+/// the case where generating an identity or advising `keygen` fits from a source that does not
+/// load. A misconfigured env source (e.g. `BITFORT_IDENTITY` set but malformed, or one of the
+/// pair set without the other) is a hard error, not "none" - otherwise a typo would silently
+/// mint a second identity instead of surfacing the mistake.
 pub fn find_identity() -> Result<Option<Identity>> {
     if let Some(identity) = identity_from_env(|var| std::env::var_os(var))? {
         return Ok(Some(identity));
@@ -43,18 +44,8 @@ pub fn find_identity() -> Result<Option<Identity>> {
     }
 }
 
-/// Load the local identity, trying each source in precedence order.
-pub fn load_identity() -> Result<Identity> {
-    match identity_from_env(|var| std::env::var_os(var))? {
-        Some(identity) => Ok(identity),
-        None => load_from_keyring(),
-    }
-}
-
 /// The env sources, in precedence order: the variable pair, then the file named by
 /// [`ENV_FILE`]. `None` means neither is configured and the caller goes on to the keyring.
-/// [`find_identity`] and [`load_identity`] both resolve through here, so they cannot disagree
-/// on what counts as configured.
 ///
 /// Half a pair is an error, whichever half it is, and it is raised before the file is read, so
 /// the stray half is never ignored in favor of another source.
@@ -153,12 +144,6 @@ pub fn store_identity(identity: &Identity) -> Result<()> {
     keyring_set(IDENTITY_ACCOUNT, serialize_identity(identity).as_str())
 }
 
-fn load_from_keyring() -> Result<Identity> {
-    // Wrap the returned blob so the plaintext secrets it holds are zeroized on drop.
-    let blob = Zeroizing::new(keyring_get(IDENTITY_ACCOUNT)?);
-    build_identity(&blob)
-}
-
 /// Rebuild an identity from a stored blob, reusing the identity-file parser so the
 /// serialization format lives in exactly one place.
 fn build_identity(blob: &str) -> Result<Identity> {
@@ -193,12 +178,6 @@ fn keyring_delete(account: &str) -> Result<()> {
 fn keyring_set(account: &str, secret: &str) -> Result<()> {
     entry(account)?
         .set_password(secret)
-        .map_err(|e| Error::Keyring(e.to_string()))
-}
-
-fn keyring_get(account: &str) -> Result<String> {
-    entry(account)?
-        .get_password()
         .map_err(|e| Error::Keyring(e.to_string()))
 }
 
@@ -424,19 +403,18 @@ mod tests {
     #[test]
     #[ignore]
     fn keyring_roundtrip() {
+        // The keyring alone: `find_identity` would take an identity from the environment.
+        let stored = || build_identity(&keyring_get_opt(IDENTITY_ACCOUNT).unwrap().unwrap());
         let id = Identity::generate().unwrap();
         store_identity(&id).unwrap();
-        assert_eq!(load_from_keyring().unwrap().anchor(), id.anchor());
+        assert_eq!(stored().unwrap().anchor(), id.anchor());
 
         // Rotation overwrites the one item in place; no stale material to clean up.
         let rotated = Identity::generate().unwrap();
         store_identity(&rotated).unwrap();
-        assert_eq!(
-            load_from_keyring().unwrap().enc_pubkey(),
-            rotated.enc_pubkey()
-        );
+        assert_eq!(stored().unwrap().enc_pubkey(), rotated.enc_pubkey());
 
         delete_identity().unwrap();
-        assert!(load_from_keyring().is_err());
+        assert!(keyring_get_opt(IDENTITY_ACCOUNT).unwrap().is_none());
     }
 }

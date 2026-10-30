@@ -1076,7 +1076,10 @@ pub fn member_list(ui: &Ui, start: Option<&Path>, env: Option<&str>) -> Result<(
     let roster = &verified.roster;
 
     if ui.json() {
-        let me = keystore::load_identity().ok().map(|id| id.sign_pubkey());
+        let me = keystore::find_identity()
+            .ok()
+            .flatten()
+            .map(|id| id.sign_pubkey());
         let members: Vec<_> = roster
             .members
             .iter()
@@ -1128,7 +1131,10 @@ pub fn member_list(ui: &Ui, start: Option<&Path>, env: Option<&str>) -> Result<(
     )))?;
 
     // Mark the local identity, when one is available, without failing the listing if not.
-    let me = keystore::load_identity().ok().map(|id| id.sign_pubkey());
+    let me = keystore::find_identity()
+        .ok()
+        .flatten()
+        .map(|id| id.sign_pubkey());
     for m in &roster.members {
         let is_me = me.as_ref().is_some_and(|k| *k == m.sign_pubkey);
         // The table goes to a real terminal, where nothing strips an escape byte, so the

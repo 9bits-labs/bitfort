@@ -55,6 +55,11 @@ the on-disk format, never against the crates.
 - [`docs/cli.mdx`](docs/cli.mdx) is the command reference, pinned to the binary by a test that
   fails the build when the two drift.
 
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). Report a security problem to
+[security@bitfort.dev](mailto:security@bitfort.dev), not in a public issue.
+
 ## Licence
 
 Apache-2.0. See [`LICENSE`](LICENSE).

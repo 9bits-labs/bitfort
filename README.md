@@ -58,7 +58,8 @@ the on-disk format, never against the crates.
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md). Report a security problem to
-[security@bitfort.dev](mailto:security@bitfort.dev), not in a public issue.
+[security@bitfort.dev](mailto:security@bitfort.dev), not in a public issue;
+[`SECURITY.md`](SECURITY.md) has the details.
 
 ## Licence
 

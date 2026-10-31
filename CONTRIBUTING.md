@@ -6,12 +6,8 @@ to report a security problem, how to build and test, and what a pull request nee
 ## Report a security problem
 
 Do not open a public issue or pull request for a vulnerability. Email
-[security@bitfort.dev](mailto:security@bitfort.dev) instead. The
-[disclosure policy](https://bitfort.dev/docs/disclosure) says when to expect an answer and how a
-fix is published.
-
-Include the output of `bitfort --version`, your platform, and the steps that show the problem.
-Do not send real secrets or private keys. A vault made with a throwaway identity is enough.
+[security@bitfort.dev](mailto:security@bitfort.dev) instead. [`SECURITY.md`](SECURITY.md) says
+what to include, what is in scope, and when to expect an answer.
 
 ## Before you start
 

@@ -60,9 +60,10 @@ rm "$key"
 
 ## Continuous integration
 
-Each pull request runs three checks: `verify linux` (the four commands above), `verify macos`
-(the tests and the heap-wipe check) and `workflow lint` (actionlint and zizmor on the
-workflows). All three must pass before a pull request can merge. CI does not replace the local
+Each pull request runs four checks: `verify linux` (the four commands above), `verify macos`
+(the tests and the heap-wipe check), `workflow lint` (actionlint and zizmor on the workflows)
+and `dco` (every commit is signed off, see below). All four must pass before a pull request can
+merge. CI does not replace the local
 run, because it does not drive the command you changed.
 
 ## What a pull request needs
@@ -86,11 +87,15 @@ run, because it does not drive the command you changed.
   a message that says why the change is needed. Pull requests merge with a merge commit, so
   each commit stays in the history and builds and passes the tests on its own.
 
-## Contributor License Agreement
+## Developer Certificate of Origin
 
-Before we merge your first pull request, you sign a Contributor License Agreement (CLA) with
-9bits LLC. We link it on that pull request. You sign it once, and it covers your later
-contributions.
+Each commit in a pull request ends with a `Signed-off-by:` line that gives the commit author's
+name and email. With that line you certify the
+[Developer Certificate of Origin 1.1](https://developercertificate.org/): you wrote the change,
+or you have the right to submit it under the project's licence. `git commit -s` adds the line,
+and `git rebase --signoff origin/main` adds it to the commits you already made. Run
+`./scripts/check-dco.sh` before you push; the `dco` check runs the same script on the pull
+request.
 
 ## Licence
 

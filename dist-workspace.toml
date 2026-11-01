@@ -1,0 +1,25 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.33.1"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["homebrew"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl"]
+# Where to host releases
+hosting = "github"
+# The formula is named after the binary, not the package.
+formula = "bitfort"
+tap = "9bits-labs/homebrew-tap"
+publish-jobs = ["homebrew"]
+# Each pull request builds every target, so a broken platform shows before a release tag.
+pr-run-mode = "upload"
+# No build cache: a release binary is built from a clean checkout only.
+cache-builds = false
+# release.yml is edited by hand (its header says why), so dist must not rewrite it.
+allow-dirty = ["ci"]

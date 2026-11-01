@@ -58,8 +58,11 @@ and say so in the report. A new command that handles secrets gets a `watch` line
 
 **CI.** `.github/workflows/ci.yml` runs step 1 on Linux, and `cargo test` plus
 `check-heap-wipe.sh` on macOS, for each pull request and each push to `main`; `lint.yml` lints
-the workflows. CI does not replace this loop: it does not drive the command you changed, and it
-runs no review.
+the workflows. `release.yml` builds the release archives (macOS and static-musl Linux, arm64 and
+x86_64) and the Homebrew formula with dist (`dist-workspace.toml`) on each pull request, and
+publishes them on a version tag; its header lists the hand edits that `dist generate` would
+undo. CI does not replace this loop: it does not drive the command you changed, and it runs no
+review.
 
 **3. Review.** BitFort is a security product, so every significant change gets reviewed before
 it is called done. Run against the diff, apply the results, then re-run steps 1-2:

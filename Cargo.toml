@@ -20,7 +20,7 @@ publish = false
 [profile.dev]
 debug = "line-tables-only"
 
-# Release binaries (dist-workspace.toml): the release profile plus thin LTO.
+# Release binaries (dist-workspace.toml).
 [profile.dist]
 inherits = "release"
 lto = "thin"

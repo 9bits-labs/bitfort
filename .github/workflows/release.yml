@@ -48,8 +48,6 @@ jobs:
       val: ${{ steps.plan.outputs.manifest }}
       tag: ${{ !github.event.pull_request && github.ref_name || '' }}
       publishing: ${{ !github.event.pull_request }}
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -177,8 +175,7 @@ jobs:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-    outputs:
-      val: ${{ steps.host.outputs.manifest }}
+      TAG: ${{ needs.plan.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -194,8 +191,6 @@ jobs:
           path: target/distrib/
           merge-multiple: true
       - id: host
-        env:
-          TAG: ${{ needs.plan.outputs.tag }}
         run: |
           dist host --tag="$TAG" --steps=upload --steps=release --output-format=json > dist-manifest.json
           cat dist-manifest.json
@@ -215,16 +210,13 @@ jobs:
         run: rm -f artifacts/*-dist-manifest.json
       - name: Create GitHub Release
         env:
-          TAG: ${{ needs.plan.outputs.tag }}
           PRERELEASE: ${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease }}
           ANNOUNCEMENT_TITLE: ${{ fromJson(steps.host.outputs.manifest).announcement_title }}
           ANNOUNCEMENT_BODY: ${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}
           RELEASE_COMMIT: ${{ github.sha }}
         run: |
-          prerelease=()
-          if [ "$PRERELEASE" = true ]; then prerelease=(--prerelease); fi
           printf '%s\n' "$ANNOUNCEMENT_BODY" > "$RUNNER_TEMP/notes.txt"
-          gh release create "$TAG" --target "$RELEASE_COMMIT" "${prerelease[@]}" \
+          gh release create "$TAG" --target "$RELEASE_COMMIT" --prerelease="$PRERELEASE" \
             --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
   # On a tag only: commits the formula to the tap with the tap's own token.
@@ -253,14 +245,14 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
+          brew update
 
           for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith(".rb")] | any)'); do
             filename=$(echo "$release" | jq '.artifacts[] | select(endswith(".rb"))' --raw-output)
             name=${filename%.rb}
             version=$(echo "$release" | jq .app_version --raw-output)
 
-            export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
-            brew update
             # Keeps the description and homepage as written in Cargo.toml.
             brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict --fix "Formula/${filename}" || true
 

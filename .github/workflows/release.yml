@@ -17,6 +17,8 @@
 # - no `${{ }}` expression is expanded inside a `run:` script: values reach the shell as
 #   environment variables;
 # - the Windows and container steps and the empty `announce` job are gone;
+# - no `musl-tools` install: no dependency compiles C, and the Rust musl targets link without
+#   musl-gcc (add the step back with the first C dependency);
 # - pull requests to main only, and a newer push to a pull request cancels the older run.
 name: release
 
@@ -98,12 +100,6 @@ jobs:
           pattern: artifacts-*
           path: target/distrib/
           merge-multiple: true
-      # Every Linux target is static musl.
-      - name: Install musl-tools
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
       - name: Build artifacts
         env:
           TAG: ${{ needs.plan.outputs.tag }}

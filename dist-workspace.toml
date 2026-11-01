@@ -24,7 +24,9 @@ cache-builds = false
 # release.yml is edited by hand (its header says why), so dist must not rewrite it.
 allow-dirty = ["ci"]
 
-# dist 0.33.1 picks macos-14 for arm64 macOS, an image GitHub retires on 2026-11-02. macos-15
-# matches the macOS version of the x86_64 runner (macos-15-intel).
+# dist 0.33.1 picks macos-14 for arm64 macOS, an image GitHub retires on 2026-11-02, and
+# macos-15-intel for x86_64, which builds in about three times as long. One arm64 runner builds
+# both; the x86_64 binary is a cross build, and no C code is compiled.
 [dist.github-custom-runners]
 aarch64-apple-darwin = "macos-15"
+x86_64-apple-darwin = "macos-15"

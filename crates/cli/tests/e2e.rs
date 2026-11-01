@@ -398,6 +398,21 @@ fn banner_is_terminal_only_never_piped() {
 }
 
 #[test]
+fn help_opens_with_the_package_description() {
+    // clap takes `about` from `description` in Cargo.toml, which the Homebrew formula shows
+    // too. Without that field, `--help` loses its one-line summary.
+    let dir = tempfile::tempdir().unwrap();
+    let id = Identity::generate().unwrap();
+    bf(dir.path(), &id)
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with(
+            "Encrypted project secrets, injected at run time\n",
+        ));
+}
+
+#[test]
 fn anchor_shows_hex_and_six_word_phrase() {
     let f = init_project();
     let anchor = f.id.anchor();

@@ -1,0 +1,11 @@
+# The workflows pin each action to a commit SHA, and nothing else moves the pins. Dependabot
+# opens a pull request when an action has a new release, but not before the release is 7 days
+# old, so a compromised release has time to be found first.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7

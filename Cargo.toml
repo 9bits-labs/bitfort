@@ -9,6 +9,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.96"
 license = "Apache-2.0"
+repository = "https://github.com/9bits-labs/bitfort"
 # Nothing here goes to crates.io: the supported artifact is the `bitfort` binary, and the
 # crates carry no stable API (see README.md).
 publish = false
@@ -18,3 +19,8 @@ publish = false
 # artifacts. Override with `debug = "full"` to run a step debugger.
 [profile.dev]
 debug = "line-tables-only"
+
+# Release binaries (dist-workspace.toml).
+[profile.dist]
+inherits = "release"
+lto = "thin"

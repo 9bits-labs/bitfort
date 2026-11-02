@@ -87,7 +87,8 @@ fn print_banner_before_help(err: &clap::Error) {
 #[command(
     name = "bitfort",
     version,
-    about = "Encrypted project secrets, injected at run time",
+    // `description` in Cargo.toml, which the Homebrew formula also shows.
+    about,
     styles = HELP_STYLES,
     // Bare `bitfort` shows the help (with the wordmark above it) rather than a terse error.
     arg_required_else_help = true

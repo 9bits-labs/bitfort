@@ -11,6 +11,11 @@ set -euo pipefail
 bin=${1:?usage: scripts/install-dist.sh <bin-dir>}
 root=$(cd "$(dirname "$0")/.." && pwd)
 version=$(sed -n 's/^cargo-dist-version = "\(.*\)"$/\1/p' "$root/dist-workspace.toml")
+if [ -z "$version" ]; then
+  echo "install-dist: found no cargo-dist-version line in $root/dist-workspace.toml;" \
+    "write it as cargo-dist-version = \"<version>\"" >&2
+  exit 1
+fi
 
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64)

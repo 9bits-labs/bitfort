@@ -13,7 +13,8 @@
 #
 # - each action is pinned to a commit SHA, and dist comes from scripts/install-dist.sh, pinned
 #   to a SHA-256, instead of a `curl | sh` installer;
-# - the token is read-only, except in `host`, which creates the GitHub Release;
+# - the token is read-only, except in `host`, which attests the artifacts and creates the
+#   GitHub Release;
 # - no `${{ }}` expression is expanded inside a `run:` script: values reach the shell as
 #   environment variables;
 # - the Windows and container steps and the empty `announce` job are gone;
@@ -165,7 +166,7 @@ jobs:
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
 
-  # On a tag only: creates the GitHub Release with every artifact attached.
+  # On a tag only: attests every artifact and creates the GitHub Release with them attached.
   host:
     needs:
       - plan
@@ -175,6 +176,9 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+      # The attestation step signs with an OIDC token and stores the attestation.
+      id-token: write
+      attestations: write
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.plan.outputs.tag }}
@@ -201,6 +205,11 @@ jobs:
       # carries that file. The per-job manifests stay out of the release.
       - name: Remove the per-job manifests
         run: rm -f target/distrib/*-dist-manifest.json
+      - name: Attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            target/distrib/*
       - name: Create GitHub Release
         env:
           PRERELEASE: ${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease }}

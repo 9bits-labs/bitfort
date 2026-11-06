@@ -13,6 +13,10 @@ installers = ["homebrew"]
 targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl"]
 # Where to host releases
 hosting = "github"
+# A GitHub build attestation (Sigstore) for each release file, made in the `host` job, the only
+# job with a write token. `gh attestation verify <file> --repo 9bits-labs/bitfort` checks a file.
+github-attestations = true
+github-attestations-phase = "host"
 tap = "9bits-labs/homebrew-tap"
 publish-jobs = ["homebrew"]
 # Each pull request builds every target, so a broken platform shows before a release tag.

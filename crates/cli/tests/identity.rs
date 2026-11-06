@@ -1,9 +1,11 @@
-//! `bitfort identity new`: provisioning a member for a machine with no keyring.
+//! `bitfort identity new` and `bitfort member add --agent`: provisioning a member for a machine
+//! or an AI agent with no keyring.
 //!
-//! This is the only command that prints private key material, so the tests cover the guard as
-//! closely as the happy path. The end-to-end test is the one that matters: before this command
-//! existed there was no way at all to obtain the `BITFORT_IDENTITY` / `BITFORT_SIGN_IDENTITY`
-//! pair a CI runner needs, because `keygen` is idempotent and never reveals a secret.
+//! These are the only two commands that print private key material, so the tests cover the
+//! guard as closely as the happy path. The end-to-end tests are the ones that matter: before
+//! `identity new` existed there was no way at all to obtain the `BITFORT_IDENTITY` /
+//! `BITFORT_SIGN_IDENTITY` pair a CI runner needs, because `keygen` is idempotent and never
+//! reveals a secret.
 
 mod common;
 
@@ -15,7 +17,7 @@ use std::time::Duration;
 use common::{bf, init_project, open_pty, raw_bf, Fixture};
 use predicates::prelude::*;
 
-/// Run `identity new` with stdout on a real terminal, so the scrollback guard is exercised.
+/// Run `bitfort <args>` with stdout on a real terminal, so the scrollback guard is exercised.
 /// Returns (exit code, everything the terminal saw).
 fn on_a_terminal(
     dir: &std::path::Path,
@@ -24,7 +26,7 @@ fn on_a_terminal(
 ) -> (i32, String) {
     let (master, slave) = open_pty();
     let mut cmd = raw_bf(dir, id);
-    cmd.arg("identity").arg("new").args(args);
+    cmd.args(args);
     cmd.stdout(Stdio::from(slave.try_clone().unwrap()));
     cmd.stderr(Stdio::from(slave.try_clone().unwrap()));
     cmd.stdin(Stdio::null());
@@ -56,15 +58,25 @@ fn assert_pair_reads_the_vault(f: &Fixture, enc: &str, sign: &str, invite: &str)
         .assert()
         .success();
 
-    let read = assert_cmd::Command::cargo_bin("bitfort")
+    assert_reads_api_key(f, enc, sign);
+}
+
+/// Run `bitfort <args>` on a second machine that holds only the pair `enc` and `sign`.
+fn with_pair(f: &Fixture, enc: &str, sign: &str, args: &[&str]) -> std::process::Output {
+    assert_cmd::Command::cargo_bin("bitfort")
         .unwrap()
         .current_dir(f.dir.path())
         .env("BITFORT_IDENTITY", enc)
         .env("BITFORT_SIGN_IDENTITY", sign)
         .env_remove("BITFORT_IDENTITY_FILE")
-        .args(["get", "API_KEY"])
+        .args(args)
         .output()
-        .unwrap();
+        .unwrap()
+}
+
+/// The pair `enc` and `sign` reads `API_KEY=s3cret`, which the caller stored.
+fn assert_reads_api_key(f: &Fixture, enc: &str, sign: &str) {
+    let read = with_pair(f, enc, sign, &["get", "API_KEY"]);
     assert!(
         read.status.success(),
         "the minted identity could not read the vault: {}",
@@ -237,7 +249,7 @@ fn an_unusable_user_variable_falls_back_but_an_explicit_name_does_not() {
 #[test]
 fn it_refuses_a_terminal_without_force() {
     let f = init_project();
-    let (code, seen) = on_a_terminal(f.dir.path(), &f.id, &[]);
+    let (code, seen) = on_a_terminal(f.dir.path(), &f.id, &["identity", "new"]);
 
     assert_ne!(code, 0, "expected a refusal, got success:\n{seen}");
     assert!(
@@ -260,7 +272,7 @@ fn it_refuses_a_terminal_without_force() {
 #[test]
 fn json_refuses_a_terminal_with_a_json_error() {
     let f = init_project();
-    let (code, seen) = on_a_terminal(f.dir.path(), &f.id, &["--json"]);
+    let (code, seen) = on_a_terminal(f.dir.path(), &f.id, &["identity", "new", "--json"]);
 
     assert_ne!(code, 0, "expected a refusal, got success:\n{seen}");
     assert!(
@@ -292,7 +304,7 @@ fn json_refuses_a_terminal_with_a_json_error() {
 #[test]
 fn force_prints_on_a_terminal() {
     let f = init_project();
-    let (code, seen) = on_a_terminal(f.dir.path(), &f.id, &["--force"]);
+    let (code, seen) = on_a_terminal(f.dir.path(), &f.id, &["identity", "new", "--force"]);
 
     assert_eq!(code, 0, "expected success with --force:\n{seen}");
     assert!(
@@ -309,7 +321,11 @@ fn force_prints_on_a_terminal() {
 #[test]
 fn json_force_prints_the_object_on_a_terminal() {
     let f = init_project();
-    let (code, seen) = on_a_terminal(f.dir.path(), &f.id, &["--force", "--json"]);
+    let (code, seen) = on_a_terminal(
+        f.dir.path(),
+        &f.id,
+        &["identity", "new", "--force", "--json"],
+    );
 
     assert_eq!(code, 0, "expected success with --force:\n{seen}");
     let line = seen
@@ -487,4 +503,329 @@ fn an_identity_file_path_that_is_not_utf8_is_shown_byte_for_byte() {
         .failure()
         .stderr(predicate::str::contains(r#"/\xff.key": "#))
         .stderr(predicate::str::contains('\u{fffd}').not());
+}
+
+// --- `member add --agent` ---
+
+/// Run `member add --agent <args>` as the project's maintainer, off a terminal.
+fn add_agent(f: &Fixture, args: &[&str]) -> std::process::Output {
+    bf(f.dir.path(), &f.id)
+        .args(["member", "add", "--agent"])
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+/// The value of the `<key>=` line in a printed identity block.
+fn printed_value<'a>(printed: &'a str, key: &str) -> &'a str {
+    printed
+        .lines()
+        .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
+        .unwrap_or_else(|| panic!("no {key} line in:\n{printed}"))
+}
+
+fn roster_version(f: &Fixture, env: &str) -> u64 {
+    bitfort_core::Project::discover(f.dir.path())
+        .unwrap()
+        .load_roster(env)
+        .unwrap()
+        .roster_version
+}
+
+/// The whole flow: one command adds the agent, and the pair it prints reads the
+/// vault on a machine that holds nothing else. Stdout is the key file, so the status lines and
+/// the warning go to stderr.
+#[test]
+fn an_agent_reads_its_environment_with_the_printed_pair() {
+    let f = init_project();
+    bf(f.dir.path(), &f.id)
+        .args(["set", "API_KEY=s3cret"])
+        .assert()
+        .success();
+
+    let out = add_agent(&f, &["bot"]);
+    let (printed, stderr) = (
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    );
+    assert!(out.status.success(), "member add --agent failed:\n{stderr}");
+    assert!(
+        stderr.contains("Added agent bot as member to 'development' (roster v2)."),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("this printed a private identity"),
+        "{stderr}"
+    );
+    assert!(
+        !printed.contains("Added"),
+        "a status line reached the key file:\n{printed}"
+    );
+    assert!(
+        printed.contains("# Revoke it with: bitfort --env development member rm 'bot'"),
+        "{printed}"
+    );
+
+    assert_reads_api_key(
+        &f,
+        printed_value(&printed, "BITFORT_IDENTITY"),
+        printed_value(&printed, "BITFORT_SIGN_IDENTITY"),
+    );
+}
+
+/// The printed block is a `BITFORT_IDENTITY_FILE` as it stands, comments and all.
+#[test]
+fn the_agent_block_is_a_valid_identity_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = init_project();
+    bf(f.dir.path(), &f.id)
+        .args(["set", "API_KEY=s3cret"])
+        .assert()
+        .success();
+    let out = add_agent(&f, &["bot"]);
+    assert!(out.status.success());
+
+    let key_file = f.dir.path().join("agent.key");
+    std::fs::write(&key_file, &out.stdout).unwrap();
+    std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_cmd::Command::cargo_bin("bitfort")
+        .unwrap()
+        .current_dir(f.dir.path())
+        .env("BITFORT_IDENTITY_FILE", &key_file)
+        .env_remove("BITFORT_IDENTITY")
+        .env_remove("BITFORT_SIGN_IDENTITY")
+        .args(["get", "API_KEY"])
+        .assert()
+        .success()
+        .stdout("s3cret\n");
+}
+
+/// The capability boundary: the agent opens the environment it was added to and no
+/// other, and the other environment's roster does not change.
+#[test]
+fn the_agent_is_a_recipient_of_its_environment_only() {
+    let f = init_project();
+    bf(f.dir.path(), &f.id)
+        .args(["env", "add", "production"])
+        .assert()
+        .success();
+    bf(f.dir.path(), &f.id)
+        .args(["--env", "production", "set", "PROD_SECRET=p"])
+        .assert()
+        .success();
+
+    let out = add_agent(&f, &["bot"]);
+    assert!(out.status.success());
+    let printed = String::from_utf8(out.stdout).unwrap();
+    let (enc, sign) = (
+        printed_value(&printed, "BITFORT_IDENTITY"),
+        printed_value(&printed, "BITFORT_SIGN_IDENTITY"),
+    );
+
+    assert!(with_pair(&f, enc, sign, &["list"]).status.success());
+    let prod = with_pair(
+        &f,
+        enc,
+        sign,
+        &["--env", "production", "get", "PROD_SECRET"],
+    );
+    assert!(!prod.status.success(), "the agent read production");
+    assert!(!String::from_utf8_lossy(&prod.stdout).contains('p'));
+    assert_eq!(roster_version(&f, "production"), 1);
+    assert_eq!(roster_version(&f, "development"), 2);
+}
+
+/// Revocation is the ordinary `member rm`, under the name the agent was added with.
+#[test]
+fn member_rm_revokes_the_agent() {
+    let f = init_project();
+    bf(f.dir.path(), &f.id)
+        .args(["set", "API_KEY=s3cret"])
+        .assert()
+        .success();
+    let out = add_agent(&f, &["bot"]);
+    assert!(out.status.success());
+    let printed = String::from_utf8(out.stdout).unwrap();
+
+    bf(f.dir.path(), &f.id)
+        .args(["member", "rm", "--yes", "bot"])
+        .assert()
+        .success();
+    let read = with_pair(
+        &f,
+        printed_value(&printed, "BITFORT_IDENTITY"),
+        printed_value(&printed, "BITFORT_SIGN_IDENTITY"),
+        &["get", "API_KEY"],
+    );
+    assert!(
+        !read.status.success(),
+        "a revoked agent still reads the vault"
+    );
+    assert!(!String::from_utf8_lossy(&read.stdout).contains("s3cret"));
+}
+
+/// `--json` gives an automated launcher one object: the two variables, and where the agent
+/// was added.
+#[test]
+fn agent_json_carries_the_pair_and_its_environment() {
+    let f = init_project();
+    bf(f.dir.path(), &f.id)
+        .args(["set", "API_KEY=s3cret"])
+        .assert()
+        .success();
+    let out = add_agent(&f, &["bot", "--json"]);
+    assert!(out.status.success());
+
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is not JSON");
+    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "BITFORT_IDENTITY",
+            "BITFORT_SIGN_IDENTITY",
+            "env",
+            "name",
+            "roster_version"
+        ]
+    );
+    assert_eq!(v["name"], "bot");
+    assert_eq!(v["env"], "development");
+    assert_eq!(v["roster_version"], 2);
+    assert_reads_api_key(
+        &f,
+        v["BITFORT_IDENTITY"].as_str().unwrap(),
+        v["BITFORT_SIGN_IDENTITY"].as_str().unwrap(),
+    );
+}
+
+/// The scrollback guard runs before the key exists and before the roster changes, so a
+/// refused run adds no member that nobody holds a key for.
+#[test]
+fn agent_refuses_a_terminal_and_changes_nothing() {
+    let f = init_project();
+    let (code, seen) = on_a_terminal(f.dir.path(), &f.id, &["member", "add", "--agent", "bot"]);
+
+    assert_ne!(code, 0, "expected a refusal, got success:\n{seen}");
+    assert!(
+        seen.contains("refusing to print a private identity to a terminal"),
+        "missing the refusal:\n{seen}"
+    );
+    assert!(
+        !seen.contains("AGE-SECRET-KEY") && !seen.contains("BITFORT_SIGN_IDENTITY"),
+        "a secret reached the terminal despite the guard:\n{seen}"
+    );
+    assert!(
+        seen.contains("bitfort --env development member add --agent 'bot' > ~/agent.key"),
+        "wrong try command:\n{seen}"
+    );
+    assert_eq!(roster_version(&f, "development"), 1);
+}
+
+#[test]
+fn agent_force_prints_on_a_terminal() {
+    let f = init_project();
+    let (code, seen) = on_a_terminal(
+        f.dir.path(),
+        &f.id,
+        &["member", "add", "--agent", "bot", "--force"],
+    );
+    assert_eq!(code, 0, "expected success with --force:\n{seen}");
+    assert!(seen.contains("BITFORT_IDENTITY="), "{seen}");
+    assert!(seen.contains("BITFORT_SIGN_IDENTITY="), "{seen}");
+    assert_eq!(roster_version(&f, "development"), 2);
+}
+
+/// Adding an agent changes membership, so a plain member cannot do it, and no key is printed.
+#[test]
+fn only_a_maintainer_can_add_an_agent() {
+    let f = init_project();
+    let bob = bitfort_core::Identity::generate().unwrap();
+    bf(f.dir.path(), &f.id)
+        .args(["member", "add", &common::invite_for(&bob, "bob")])
+        .assert()
+        .success();
+
+    bf(f.dir.path(), &bob)
+        .args(["member", "add", "--agent", "bot"])
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("only a maintainer"));
+}
+
+/// `member rm` addresses a member by name, so a second agent under a taken name is refused,
+/// before any key is printed and before the roster changes.
+#[test]
+fn a_taken_agent_name_is_refused_before_a_key_is_printed() {
+    let f = init_project();
+    assert!(add_agent(&f, &["bot"]).status.success());
+
+    let again = add_agent(&f, &["BOT"]);
+    assert!(!again.status.success());
+    assert!(
+        again.stdout.is_empty(),
+        "a key was printed for a refused add"
+    );
+    assert!(String::from_utf8_lossy(&again.stderr).contains("already exists"));
+    assert_eq!(roster_version(&f, "development"), 2);
+}
+
+/// `--agent` takes no invite and makes a plain member, so the invite and the flags that shape
+/// an invited member conflict with it, and `--force` means nothing without it.
+#[test]
+fn agent_conflicts_with_an_invite_and_its_flags() {
+    let f = init_project();
+    let bob = bitfort_core::Identity::generate().unwrap();
+    let invite = common::invite_for(&bob, "bob");
+    for args in [
+        &["member", "add", "--agent", "bot", invite.as_str()][..],
+        &["member", "add", "--agent", "bot", "--maintainer"],
+        &["member", "add", "--agent", "bot", "--name", "other"],
+        &["member", "add", "--force", invite.as_str()],
+        &["member", "add"],
+    ] {
+        bf(f.dir.path(), &f.id).args(args).assert().code(2);
+    }
+    assert_eq!(roster_version(&f, "development"), 1);
+}
+
+/// When the key cannot be written after the roster changed, the error says that the agent is a
+/// member whose key nobody holds, and how to remove it. Linux only: `/dev/full` fails every
+/// write and nothing else, and macOS has no such device (its file size limit holds only at zero,
+/// which also stops the roster write).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failed_agent_write_names_the_member_to_remove() {
+    let f = init_project();
+    let out = raw_bf(f.dir.path(), &f.id)
+        .args(["member", "add", "--agent", "bot"])
+        .stdout(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .unwrap(),
+        )
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(
+        stderr
+            .contains("agent 'bot' is now a member of 'development', but its key was not printed"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("bitfort --env development member rm 'bot'"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("could not write to standard output"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("this printed a private identity"),
+        "{stderr}"
+    );
 }

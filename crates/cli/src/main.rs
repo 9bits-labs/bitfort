@@ -104,11 +104,11 @@ struct Cli {
 
     /// Emit machine-readable JSON instead of human text.
     ///
-    /// Honored by status, list, verify, anchor, member list, env list and identity new. Other
-    /// commands keep their text output. Under --json no command asks a question: a
-    /// confirmation needs --yes, and init takes its defaults. The terminal guards on export
-    /// and identity new still refuse a terminal. Errors become `{"error": .., "try": ..}` on stderr, except
-    /// argument errors.
+    /// Honored by status, list, verify, anchor, member list, env list, identity new and member
+    /// add --agent. Other commands keep their text output. Under --json no command asks a
+    /// question: a confirmation needs --yes, and init takes its defaults. The terminal guards on
+    /// export, identity new and member add --agent still refuse a terminal. Errors become
+    /// `{"error": .., "try": ..}` on stderr, except argument errors.
     #[arg(long, global = true)]
     json: bool,
 
@@ -142,16 +142,26 @@ enum EnvCommand {
 
 #[derive(Subcommand)]
 enum MemberCommand {
-    /// Add the identity from an invite blob to the environment's roster.
+    /// Add the identity from an invite blob to the environment's roster, or mint one for an AI
+    /// agent with `--agent`.
     Add {
         /// The `bfinvite1:...` blob produced by the new developer's `keygen`.
-        invite: String,
+        #[arg(required_unless_present = "agent")]
+        invite: Option<String>,
         /// Add as a maintainer (can sign roster changes) instead of a plain member.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "agent")]
         maintainer: bool,
         /// Override the display name suggested in the invite.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "agent")]
         name: Option<String>,
+        /// Mint an identity for an AI agent, add it to this environment only, and print its
+        /// `BITFORT_IDENTITY` and `BITFORT_SIGN_IDENTITY`.
+        #[arg(long, value_name = "NAME", conflicts_with = "invite")]
+        agent: Option<String>,
+        /// With `--agent`: print to a terminal anyway (default: refuse, to avoid scrollback
+        /// exposure).
+        #[arg(long, requires = "agent", conflicts_with = "invite")]
+        force: bool,
     },
     /// Remove a member by name and re-encrypt without their key.
     Rm {
@@ -347,8 +357,22 @@ fn main() -> ExitCode {
                 invite,
                 maintainer,
                 name,
-            } => commands::member_add(start.as_deref(), env.as_deref(), &invite, maintainer, name)
-                .map(|_| 0),
+                agent,
+                force,
+            } => match (agent, invite) {
+                (Some(agent), _) => {
+                    commands::member_add_agent(&ui, start.as_deref(), env.as_deref(), &agent, force)
+                }
+                (None, Some(invite)) => commands::member_add(
+                    start.as_deref(),
+                    env.as_deref(),
+                    &invite,
+                    maintainer,
+                    name,
+                ),
+                (None, None) => unreachable!("clap requires INVITE unless --agent is present"),
+            }
+            .map(|_| 0),
             MemberCommand::Rm { name } => {
                 commands::member_rm(&ui, start.as_deref(), env.as_deref(), &name, yes).map(|_| 0)
             }

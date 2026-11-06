@@ -1,5 +1,5 @@
 [package]
-name = "bitfort-cli"
+name = "bitfort"
 description = "Encrypted project secrets, injected at run time"
 version.workspace = true
 edition.workspace = true

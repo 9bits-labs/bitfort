@@ -9,9 +9,9 @@
 # Uses a separate target dir so it never invalidates the stable target/ cache.
 #
 # Usage:  scripts/dev-fast.sh [cargo-args...]   (defaults to `build`)
-#   scripts/dev-fast.sh build -p bitfort-cli
+#   scripts/dev-fast.sh build -p bitfort
 #   scripts/dev-fast.sh test --workspace
-#   scripts/dev-fast.sh run -p bitfort-cli -- --version
+#   scripts/dev-fast.sh run -p bitfort -- --version
 set -euo pipefail
 
 if ! rustup toolchain list | grep -q '^nightly'; then

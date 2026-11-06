@@ -81,7 +81,7 @@ run, because it does not drive the command you changed.
 - **No secrets.** No real secret, `.env` file or private key goes into a commit, a fixture or a
   log line. Tests generate their keys.
 - **Dependencies.** Say in the pull request why each new dependency is needed.
-  `bitfort-core` and `bitfort-cli` never take a GUI or webview dependency.
+  `bitfort-core` and `bitfort` never take a GUI or webview dependency.
 - **Commits.** Use [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`,
   `fix:`, `refactor:`, `docs:`, `test:`, `ci:`, `chore:`), one logical change per commit, with
   a message that says why the change is needed. Pull requests merge with a merge commit, so

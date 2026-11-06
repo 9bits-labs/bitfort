@@ -13,8 +13,6 @@ installers = ["homebrew"]
 targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl"]
 # Where to host releases
 hosting = "github"
-# The formula is named after the binary, not the package.
-formula = "bitfort"
 tap = "9bits-labs/homebrew-tap"
 publish-jobs = ["homebrew"]
 # Each pull request builds every target, so a broken platform shows before a release tag.

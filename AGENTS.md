@@ -15,7 +15,7 @@ Rust workspace; crate folders under `crates/` are not prefixed with `bitfort`.
 | Folder | Package | Notes |
 |---|---|---|
 | `crates/core` | `bitfort-core` | Crypto, roster, vault engine. **No GUI/webview dependency, ever.** |
-| `crates/cli` | `bitfort-cli` (binary `bitfort`) | Hot-path CLI. Links only `bitfort-core`. Must run on bare Linux/CI. |
+| `crates/cli` | `bitfort` | Hot-path CLI. Links only `bitfort-core`. Must run on bare Linux/CI. |
 
 A desktop app is out of scope (`docs/SPEC.md` §9.2); do not scaffold one.
 
@@ -93,7 +93,7 @@ test that fails before the fix.
 
 ```sh
 cargo test -p bitfort-core version_is_reported   # one test by name
-cargo run -p bitfort-cli -- --version            # run the CLI without building a path
+cargo run -p bitfort -- --version                # run the CLI without building a path
 cargo build --release                            # optimized binary at target/release/bitfort
 ./scripts/check-cli-build.sh                     # dependency audit (see invariant 5)
 ```
@@ -122,7 +122,7 @@ Load-bearing. A change that breaks one is a regression even if tests pass. Detai
    verification. A signed field is never conditionally serialized: presence must not depend on
    value.
 5. **The shipped CLI carries no GUI/webview dependency and no licensing code.** Keep
-   `bitfort-core` and `bitfort-cli` free of `tauri`/webkit so they load on headless Linux;
+   `bitfort-core` and `bitfort` free of `tauri`/webkit so they load on headless Linux;
    `scripts/check-cli-build.sh` asserts it. The open CLI has no paid tier, license token, or
    token-signing code.
 6. **Runtime secret hygiene.** Never log secret values or age identities; zeroize the parent's

@@ -14,7 +14,7 @@ These apply to every command.
 |---|---|
 | `--env <ENV>` | Environment to act on. Defaults to `default_env` in `config.toml`. |
 | `--dir <DIR>` | Directory to start the search for `.bitfort/` from. |
-| `--json` | Machine-readable output. Honored by `status`, `list`, `verify`, `anchor`, `member list`, `env list` and `identity new`. Other commands keep their text output. Under `--json` no command asks a question: a confirmation needs `--yes`, and `init` takes its defaults. The terminal guards on `export` and `identity new` still refuse a terminal. Errors, except argument errors, become `{"error": .., "try": ..}` on standard error. |
+| `--json` | Machine-readable output. Honored by `status`, `list`, `verify`, `anchor`, `member list`, `env list`, `identity new` and `member add --agent`. Other commands keep their text output. Under `--json` no command asks a question: a confirmation needs `--yes`, and `init` takes its defaults. The terminal guards on `export`, `identity new` and `member add --agent` still refuse a terminal. Errors, except argument errors, become `{"error": .., "try": ..}` on standard error. |
 | `-y`, `--yes` | Skip the confirmation on `unset`, `member rm`, and a `set` that overwrites. Required when there is no terminal to answer the prompt. |
 | `-q`, `--quiet` | Drop titles, hints and spacer lines. Keeps facts, data and errors. |
 | `-V`, `--version` | Print the version. |
@@ -41,7 +41,8 @@ Running it again does not replace an existing identity.
 ### `bitfort identity new`
 
 Mint a fresh identity and print both secrets, to provision a machine that has no keyring: a CI
-runner or a container. This is the only command that prints private key material.
+runner or a container. This command and `member add --agent` are the only two that print private
+key material.
 
 `--name <NAME>` sets the display name in the invite blob. `--force` prints to a terminal
 anyway; without it the command refuses one, so the key does not land in your scrollback.
@@ -170,6 +171,21 @@ re-encrypt. Maintainers only.
 
 `--maintainer` adds them with the right to sign roster changes. `--name <NAME>` overrides the
 name suggested in the invite.
+
+`--agent <NAME>` takes no invite. It mints an identity for an AI agent, adds it to the target
+environment as a plain member, and prints the `BITFORT_IDENTITY` and `BITFORT_SIGN_IDENTITY` that
+the agent's launcher needs. The agent is a recipient of that environment only, and
+`bitfort member rm <NAME>` revokes it. The output has the guards of `identity new`: it refuses a
+terminal without `--force`, and the block it writes is a valid `BITFORT_IDENTITY_FILE`. With
+`--json` it prints one object with the two variables, `name`, `env` and `roster_version`.
+
+```bash
+(umask 077; bitfort --env development member add --agent claude-web > ~/agent.key)
+```
+
+Put the two values in the agent platform's secret store, then delete the file. The agent can
+also change secrets in its environment, as any member can, and each vault it writes carries its
+signature.
 
 A display name must be printable ASCII (U+0020 to U+007E) of at most 64 characters. The name
 sits inside the signed roster and `member list` prints it back, so a newline would show one

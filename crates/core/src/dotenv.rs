@@ -239,7 +239,7 @@ pub fn to_shell<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Resu
 /// evaluate rather than text to read. Use `--format dotenv` or `--format json` to read one.
 /// Written straight into `out` rather than returned: a returned `String` is a second copy of
 /// the plaintext, up to `VALUE_SIZE_WARN` bytes of it, that nothing zeroizes.
-fn shell_quote(out: &mut String, value: &str) {
+pub fn shell_quote(out: &mut String, value: &str) {
     out.push('\'');
     for (i, part) in value.split('\'').enumerate() {
         if i > 0 {

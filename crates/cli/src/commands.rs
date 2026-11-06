@@ -216,10 +216,10 @@ pub fn keygen(ui: &Ui, name: Option<String>) -> Result<()> {
 
 /// `bitfort identity new`: mint a fresh identity and print both secrets.
 ///
-/// This is the only command that prints private key material, and it exists because a machine
-/// with no keyring - a CI runner, a container - needs `BITFORT_IDENTITY` and
-/// `BITFORT_SIGN_IDENTITY` supplied out of band (docs/SPEC.md §3.1), and no other command can
-/// produce them. `keygen` cannot: it is idempotent, so on a machine that already holds an
+/// One of the two commands that print private key material, with `member add --agent`. It
+/// exists because a machine with no keyring - a CI runner, a container - needs
+/// `BITFORT_IDENTITY` and `BITFORT_SIGN_IDENTITY` supplied out of band (docs/SPEC.md §3.1).
+/// `keygen` cannot supply them: it is idempotent, so on a machine that already holds an
 /// identity it returns that one, and it never reveals a secret.
 ///
 /// Three things keep the blast radius small:
@@ -240,11 +240,7 @@ pub fn identity_new(ui: &Ui, name: Option<String>, force: bool) -> Result<()> {
         } else {
             "(umask 077; bitfort identity new --name ci > ~/ci.key)"
         };
-        return Err(Failure::hinted(
-            "refusing to print a private identity to a terminal\nthis would leave the key in \
-             scrollback; redirect it to a file or a consumer instead",
-            format!("{redirect}   (or pass --force)"),
-        ));
+        return Err(terminal_refusal(redirect));
     }
 
     let name = resolve_name(name);
@@ -278,6 +274,16 @@ pub fn identity_new(ui: &Ui, name: Option<String>, force: bool) -> Result<()> {
          any file you wrote it to"
     );
     Ok(())
+}
+
+/// The refusal of the two commands that print a private identity, when stdout is a terminal
+/// and `--force` is absent. `redirect` is the same command, sent to a file.
+fn terminal_refusal(redirect: &str) -> anyhow::Error {
+    Failure::hinted(
+        "refusing to print a private identity to a terminal\nthis would leave the key in \
+         scrollback; redirect it to a file or a consumer instead",
+        format!("{redirect}   (or pass --force)"),
+    )
 }
 
 /// `bitfort anchor [--share]`: print the project's trust anchor - the hex fingerprint plus
@@ -908,23 +914,140 @@ pub fn member_add(
     name_override: Option<String>,
 ) -> Result<()> {
     let opened = open(start, env)?;
-    let (project, env) = (&opened.project, opened.env.as_str());
-
     let (identity, verified) = authorize_maintainer(&opened, "change membership")?;
-    let current = &verified.roster;
 
-    let invite = Invite::decode(invite_blob)?;
+    let mut invite = Invite::decode(invite_blob)?;
     // Untrusted input, pasted from a chat message. Reject malformed key material now, before
     // any file is written, so a bad key cannot leave the roster one version ahead of the vault.
     invite.validate_keys()?;
-    // `Invite::decode` already checked the name inside the blob; this covers the override,
+    // `Invite::decode` already checked the name inside the blob; `admit` checks the override,
     // which reaches the signed roster by the same path.
-    let name = name_override.unwrap_or_else(|| invite.name.clone());
-    let name = name.trim().to_string();
-    bitfort_core::roster::validate_member_name(&name)?;
+    if let Some(name) = name_override {
+        invite.name = name;
+    }
+    invite.name = invite.name.trim().to_string();
+    let role = if maintainer {
+        Role::Maintainer
+    } else {
+        Role::Member
+    };
+    let version = admit(&opened, &identity, &verified, &invite, role)?;
+
+    let role = if maintainer { "maintainer" } else { "member" };
+    outln!(
+        "Added {} as {role} to '{}' (roster v{version}).",
+        invite.name,
+        opened.env
+    )?;
+    outln!("Commit the change and open a PR so reviewers see the signed roster bump.")?;
+    Ok(())
+}
+
+/// `bitfort member add --agent <name>`: mint an identity for an AI agent, add it to the target
+/// environment as a plain member, and print the two variables the agent's launcher needs
+/// (docs/SPEC.md §7.2). The agent holds a key to this environment only, and `member rm <name>`
+/// revokes it like any other member. Write path.
+///
+/// The printed pair is the only copy of the key, so the guard of `identity new` applies: no
+/// terminal without `--force`. The guard runs before the key exists and before the roster
+/// changes, so a refused run leaves nothing behind.
+pub fn member_add_agent(
+    ui: &Ui,
+    start: Option<&Path>,
+    env: Option<&str>,
+    name: &str,
+    force: bool,
+) -> Result<()> {
+    let opened = open(start, env)?;
+    let (identity, verified) = authorize_maintainer(&opened, "change membership")?;
+    let env = opened.env.as_str();
+    let name = name.trim();
+    let mut quoted = String::new();
+    dotenv::shell_quote(&mut quoted, name);
+
+    if ui.stdout_is_terminal() && !force {
+        let redirect = if ui.json() {
+            format!(
+                "(umask 077; bitfort --env {env} member add --agent {quoted} --json > \
+                 ~/agent.json)"
+            )
+        } else {
+            format!("(umask 077; bitfort --env {env} member add --agent {quoted} > ~/agent.key)")
+        };
+        return Err(terminal_refusal(&redirect));
+    }
+
+    // Deliberately not `keystore::store_identity`: this identity belongs to the agent.
+    let agent = Identity::generate()?;
+    let newcomer = Invite::from_identity(&agent, name);
+    let version = admit(&opened, &identity, &verified, &newcomer, Role::Member)?;
+
+    let revoke = format!("bitfort --env {env} member rm {quoted}");
+    print_agent_identity(ui, &agent, name, env, version, &revoke).with_context(|| {
+        format!(
+            "agent '{name}' is now a member of '{env}', but its key was not printed\nremove \
+             it with: {revoke}"
+        )
+    })?;
+    // To stderr, so that none of it lands in the key file that stdout is redirected to.
+    eprintln!("Added agent {name} as member to '{env}' (roster v{version}).");
+    eprintln!("Commit the change and open a PR so reviewers see the signed roster bump.");
+    eprintln!(
+        "warning: this printed a private identity; put it in the agent's secret store and \
+         delete any file you wrote it to"
+    );
+    Ok(())
+}
+
+/// The output of `member add --agent`: `BITFORT_IDENTITY` and `BITFORT_SIGN_IDENTITY` as an
+/// identity file, as `identity new` prints them, or as one JSON object under `--json`.
+fn print_agent_identity(
+    ui: &Ui,
+    agent: &Identity,
+    name: &str,
+    env: &str,
+    version: u64,
+    revoke: &str,
+) -> Result<()> {
+    let (enc, sign) = (agent.enc_secret(), agent.sign_secret());
+    if ui.json() {
+        return ui.emit_json(&json!({
+            (keystore::ENV_ENC): enc.as_str(),
+            (keystore::ENV_SIGN): sign.as_str(),
+            "name": name,
+            "env": env,
+            "roster_version": version,
+        }));
+    }
+    // The identity-file parser skips `#` lines, so `> agent.key` needs no editing.
+    ui.line(&format!(
+        "# bitfort agent '{name}', a member of '{env}' (roster v{version})"
+    ))?;
+    ui.line(&format!("# Revoke it with: {revoke}"))?;
+    ui.line(&format!("{}={}", keystore::ENV_ENC, enc.as_str()))?;
+    ui.line(&format!("{}={}", keystore::ENV_SIGN, sign.as_str()))
+}
+
+/// The part of `member add` that both of its forms share: refuse a newcomer that would make the
+/// roster ambiguous, sign the next roster version with `identity`, and re-encrypt the vault to
+/// it. Returns that version.
+fn admit(
+    opened: &Opened,
+    identity: &Identity,
+    verified: &Verified,
+    newcomer: &Invite,
+    role: Role,
+) -> Result<u64> {
+    let env = opened.env.as_str();
+    let current = &verified.roster;
+    let name = &newcomer.name;
+    bitfort_core::roster::validate_member_name(name)?;
     // Reject a member that would collide on identity (same signing key) or on name (which
     // `member rm` addresses by), either of which makes the roster ambiguous.
-    if current.member_by_sign_pubkey(&invite.sign_pubkey).is_some() {
+    if current
+        .member_by_sign_pubkey(&newcomer.sign_pubkey)
+        .is_some()
+    {
         bail!("that identity is already a member of '{env}'");
     }
     // Case-insensitively: `member rm` takes a name, and two members whose names differ only
@@ -932,10 +1055,11 @@ pub fn member_add(
     if let Some(existing) = current
         .members
         .iter()
-        .find(|m| m.name.eq_ignore_ascii_case(&name))
+        .find(|m| m.name.eq_ignore_ascii_case(name))
     {
         bail!(
-            "a member named '{}' already exists in '{env}'; pass --name to disambiguate",
+            "a member named '{}' already exists in '{env}'; choose another name (--name for an \
+             invite, the --agent value for an agent)",
             bitfort_core::roster::display_name(&existing.name)
         );
     }
@@ -945,7 +1069,7 @@ pub fn member_add(
     if let Some(existing) = current
         .members
         .iter()
-        .find(|m| m.enc_pubkey == invite.enc_pubkey)
+        .find(|m| m.enc_pubkey == newcomer.enc_pubkey)
     {
         bail!(
             "that encryption key is already in '{env}' as '{}'\nAdding it twice would make \
@@ -958,31 +1082,20 @@ pub fn member_add(
     // build may have written before the rule existed. Refusing it would leave that team unable
     // to change membership at all, while copying it raw would carry a forged row into the new
     // signed roster.
-    let signer_name = bitfort_core::roster::display_name(&acting_member_name(current, &identity));
+    let signer_name = bitfort_core::roster::display_name(&acting_member_name(current, identity));
     let mut next = current.amend()?;
     next.members.push(Member {
         name: name.clone(),
-        enc_pubkey: invite.enc_pubkey,
-        sign_pubkey: invite.sign_pubkey,
-        role: if maintainer {
-            Role::Maintainer
-        } else {
-            Role::Member
-        },
+        enc_pubkey: newcomer.enc_pubkey.clone(),
+        sign_pubkey: newcomer.sign_pubkey.clone(),
+        role,
         added_by: signer_name.clone(),
         added_at: clock::now_rfc3339(),
     });
-    next.sign(&identity, &signer_name)?;
+    next.sign(identity, &signer_name)?;
 
-    reencrypt_to_new_roster(project, env, &identity, &verified, &next)?;
-
-    let role = if maintainer { "maintainer" } else { "member" };
-    outln!(
-        "Added {name} as {role} to '{env}' (roster v{}).",
-        next.roster_version
-    )?;
-    outln!("Commit the change and open a PR so reviewers see the signed roster bump.")?;
-    Ok(())
+    reencrypt_to_new_roster(&opened.project, env, identity, verified, &next)?;
+    Ok(next.roster_version)
 }
 
 /// `bitfort member rm <name>`: a maintainer removes a member, bumps + re-signs the

@@ -99,6 +99,7 @@ invite=$("$bin" identity new --force --name second 2>/dev/null |
   sed -n 's/^# \(bfinvite1:.*\)/\1/p')
 watch "member add" 0 "" member add --yes "$invite"
 watch "member rm" 0 "" member rm --yes second
+watch "member add --agent" 0 "" member add --agent bot
 
 # A conflict on A: main holds $ours, a branch holds $theirs.
 bf set --yes A=base

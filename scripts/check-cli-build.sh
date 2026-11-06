@@ -10,11 +10,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-tree=$(cargo tree -p bitfort-cli --edges normal --prefix none)
+tree=$(cargo tree -p bitfort --edges normal --prefix none)
 gui=$(printf '%s\n' "$tree" | grep -Ei '^(tauri|wry|webkit|javascriptcore)' || true)
 if [ -n "$gui" ]; then
-  echo "FAIL: bitfort-cli links a GUI/webview crate:" >&2
+  echo "FAIL: bitfort links a GUI/webview crate:" >&2
   printf '%s\n' "$gui" >&2
   exit 1
 fi
-echo "ok: bitfort-cli links no GUI/webview crate"
+echo "ok: bitfort links no GUI/webview crate"

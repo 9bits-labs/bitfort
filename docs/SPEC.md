@@ -788,7 +788,7 @@ Verify latest compatible versions at implementation time (do not pin from memory
 
 | Concern | Choice |
 |---|---|
-| Language | Rust (workspace: `bitfort-core` lib, `bitfort-cli` bin = **no webview dep**; see §9.1) |
+| Language | Rust (workspace: `bitfort-core` lib, `bitfort` bin = **no webview dep**; see §9.1) |
 | Encryption | `age` (X25519 recipients + ChaCha20-Poly1305), **ASCII-armored** output (§4.4) |
 | Signing | Ed25519 (`ed25519-dalek`) for the roster and the vault payload |
 | Canonical signing bytes | RFC 8785 JCS (e.g. `serde_jcs`), domain-separated (§4.3) - not ad-hoc key sorting |

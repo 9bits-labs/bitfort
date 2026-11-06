@@ -1,5 +1,5 @@
 [package]
-name = "bitfort-cli"
+name = "bitfort"
 description = "Encrypted project secrets, injected at run time"
 version.workspace = true
 edition.workspace = true
@@ -12,10 +12,6 @@ publish.workspace = true
 # release it (dist-workspace.toml).
 [package.metadata.dist]
 dist = true
-
-[[bin]]
-name = "bitfort"
-path = "src/main.rs"
 
 [dependencies]
 bitfort-core = { path = "../core" }

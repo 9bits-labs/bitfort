@@ -972,15 +972,16 @@ mod tests {
         (dir, project, id)
     }
 
-    fn run_git(dir: &Path, args: &[&str]) {
-        let ok = std::process::Command::new("git")
+    /// Run git in `dir`, assert that it succeeded, and return its stdout.
+    fn run_git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
             .arg("-C")
             .arg(dir)
             .args(args)
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok, "git {args:?} failed");
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?} failed: {out:?}");
+        String::from_utf8(out.stdout).unwrap()
     }
 
     fn git_init(root: &Path) {
@@ -1328,6 +1329,62 @@ mod tests {
     }
 
     #[test]
+    fn a_committed_roster_of_another_environment_or_project_does_not_raise_the_ceiling() {
+        // Each binding filters on its own. A roster that names another environment, or
+        // another project, is not a revision of this one, even when a maintainer signed it;
+        // counting it would refuse this environment's real roster as a downgrade.
+        let (dir, project, alice) = init_project();
+        let root = dir.path();
+        git_init(root);
+        git_commit_all(root, "v1");
+
+        let path = project.roster_path("development");
+        let real = std::fs::read_to_string(&path).unwrap();
+        for edit in [
+            |r: &mut Roster| r.env = "staging".into(),
+            |r: &mut Roster| r.project_id = "0".repeat(32),
+        ] {
+            let mut foreign = project.load_roster("development").unwrap();
+            edit(&mut foreign);
+            foreign.roster_version = 9;
+            foreign.signatures.clear();
+            foreign.sign(&alice, "alice").unwrap();
+            project.save_roster("development", &foreign).unwrap();
+            git_commit_all(root, "a foreign roster at this path");
+            std::fs::write(&path, &real).unwrap();
+            git_commit_all(root, "restore");
+        }
+
+        let verified = project.verify_roster("development").unwrap();
+        assert_eq!(verified.guard, RollbackGuard::Enforced { highest: 1 });
+    }
+
+    #[test]
+    fn commit_init_commits_the_project_and_its_gitignore_only() {
+        // The `init` wizard's path, which only a terminal reaches in the CLI tests.
+        let (dir, project, _id) = init_project();
+        assert!(!project.in_git_work_tree());
+        project.init_git().unwrap();
+        assert!(project.in_git_work_tree());
+        run_git(dir.path(), &["config", "user.email", "t@e.com"]);
+        run_git(dir.path(), &["config", "user.name", "t"]);
+        std::fs::write(dir.path().join("unrelated.txt"), "x").unwrap();
+        run_git(dir.path(), &["add", "unrelated.txt"]);
+
+        project.commit_init("init").unwrap();
+
+        let committed = run_git(dir.path(), &["show", "--name-only", "--format=", "HEAD"]);
+        assert!(committed.contains(".gitignore"), "{committed}");
+        assert!(committed.contains(".bitfort/config.toml"), "{committed}");
+        assert!(!committed.contains("unrelated.txt"), "{committed}");
+        assert_eq!(
+            run_git(dir.path(), &["diff", "--cached", "--name-only"]).trim(),
+            "unrelated.txt",
+            "other staged work stays staged"
+        );
+    }
+
+    #[test]
     fn a_shallow_clone_verifies_but_reports_no_enforcement() {
         // The `actions/checkout` default. The chain still verifies from the tree; the
         // ceiling cannot be trusted, and that must be reported rather than read as zero.
@@ -1496,6 +1553,67 @@ mod tests {
     }
 
     #[test]
+    fn environment_exists_sees_any_one_of_its_files() {
+        // A partial checkout or a merge can leave any one of the three behind, and a fresh v1
+        // roster written over that one file still destroys the environment.
+        let (_dir, project, _id) = init_project();
+        for file in [
+            project.roster_path("staging"),
+            project.chain_path("staging"),
+            project.vault_path("staging"),
+        ] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "{}").unwrap();
+            assert!(project.environment_exists("staging"), "{}", file.display());
+            std::fs::remove_file(&file).unwrap();
+        }
+    }
+
+    #[test]
+    fn load_chain_reads_only_a_missing_file_as_empty() {
+        // An absent chain is an empty one, which is the state of a v1 environment. A chain
+        // file that exists but cannot be read must not pass for one.
+        let (_dir, project, _id) = init_project();
+        assert!(project
+            .load_chain("development")
+            .unwrap()
+            .rosters
+            .is_empty());
+        std::fs::create_dir(project.chain_path("development")).unwrap();
+        assert!(project.load_chain("development").is_err());
+    }
+
+    #[test]
+    fn vault_has_conflict_markers_reads_only_a_missing_file_as_clean() {
+        let (_dir, project, _id) = init_project();
+        let path = project.vault_path("development");
+        assert!(!project.vault_has_conflict_markers("development").unwrap());
+        std::fs::remove_file(&path).unwrap();
+        assert!(!project.vault_has_conflict_markers("development").unwrap());
+        std::fs::create_dir(&path).unwrap();
+        assert!(project.vault_has_conflict_markers("development").is_err());
+    }
+
+    #[test]
+    fn ensure_dotenv_gitignored_appends_the_rule_on_a_line_of_its_own() {
+        // A last line with no newline would take `.env*` as its suffix (`target/.env*`), and a
+        // plaintext dotenv file would stay committable (invariant 1).
+        let (_dir, project, _id) = init_project();
+        let path = project.root().join(".gitignore");
+        for (before, after) in [
+            ("target/", "target/\n.env*\n"),
+            ("target/\n", "target/\n.env*\n"),
+        ] {
+            std::fs::write(&path, before).unwrap();
+            project.ensure_dotenv_gitignored().unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), after);
+        }
+        std::fs::remove_file(&path).unwrap();
+        project.ensure_dotenv_gitignored().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), ".env*\n");
+    }
+
+    #[test]
     fn is_dotenv_gitignored_reflects_gitignore() {
         let (_dir, project, _id) = init_project();
         assert!(project.is_dotenv_gitignored());
@@ -1574,6 +1692,41 @@ mod tests {
         assert!(matches!(
             project.load_vault_conflict("development", &id, &verified),
             Ok(VaultConflict::None)
+        ));
+    }
+
+    #[test]
+    fn one_side_with_no_ancestor_is_an_incomplete_conflict() {
+        // An unmerged entry that holds only our side is still a conflict, and must not read as
+        // "no merge in progress". `update-index --index-info` writes that entry directly.
+        let (dir, project, id) = init_project();
+        git_init(dir.path());
+        git_commit_all(dir.path(), "init");
+        let verified = project.verify_roster("development").unwrap();
+
+        let rel =
+            relativize_under_root(project.root(), &project.vault_path("development")).unwrap();
+        let blob = run_git(dir.path(), &["hash-object", "-w", &rel]);
+        let mut update = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["update-index", "--index-info"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Drop the merged entry, then add ours at stage 2.
+        let zero = "0".repeat(40);
+        let entries = format!("0 {zero}\t{rel}\n100644 {} 2\t{rel}\n", blob.trim());
+        std::io::Write::write_all(&mut update.stdin.take().unwrap(), entries.as_bytes()).unwrap();
+        assert!(update.wait().unwrap().success());
+
+        assert!(matches!(
+            project.load_vault_conflict("development", &id, &verified),
+            Ok(VaultConflict::Incomplete {
+                ancestor: false,
+                ours: true,
+                theirs: false
+            })
         ));
     }
 

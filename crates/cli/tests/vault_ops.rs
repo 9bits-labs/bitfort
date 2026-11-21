@@ -160,6 +160,29 @@ fn resolve_refuses_once_the_merge_state_is_gone() {
 }
 
 #[test]
+fn resolve_outside_a_repository_does_not_name_a_git_repair() {
+    // Outside a repository there is no index to restore a merge from, so the refusal must
+    // not send the user to `git checkout --merge`.
+    let f = common::init_project();
+    let path = common::vault_path(f.dir.path(), "development");
+    let vault = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        format!("<<<<<<< HEAD\n{vault}=======\n{vault}>>>>>>> other\n"),
+    )
+    .unwrap();
+
+    bf(f.dir.path(), &f.id)
+        .arg("resolve")
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("not in a git repository")
+                .and(predicate::str::contains("git checkout --merge").not()),
+        );
+}
+
+#[test]
 fn a_second_resolve_keeps_what_was_written_after_the_first() {
     // Git holds the unmerged entry until the path is staged, so a second `resolve` reads the
     // same stages - and rebuilding the vault from them would discard every `set` made since,

@@ -1,0 +1,52 @@
+# Mutation testing with cargo-mutants (https://mutants.rs). Each mutant is one small change to
+# the code, such as a check that always passes; a mutant that every test survives is a check
+# that no test proves. .github/workflows/mutants.yml runs it on the lines each pull request
+# changes and, each week, on the whole scope below, and a missed mutant fails the job. Kill a
+# missed mutant with a test; only when no test can tell it apart from the code, add it to
+# `exclude_re` below with the reason.
+#
+# The scope is the code that enforces the security invariants in AGENTS.md: roster and chain
+# verification (2), the git anti-rollback witness (3), vault authentication (7), and the
+# environment filter of `run` (6).
+examine_globs = [
+  "crates/core/src/chain.rs",
+  "crates/core/src/git.rs",
+  "crates/core/src/project.rs",
+  "crates/core/src/roster.rs",
+  "crates/core/src/vault.rs",
+  "crates/cli/src/run.rs",
+]
+
+# The CLI tests drive the core checks through the binary, and for some checks they are the
+# only tests, so each mutant runs the tests of the whole workspace.
+test_workspace = true
+
+# The default timeout is 5 times the baseline test run. With several jobs (`-j`), the tamper
+# matrix and the other e2e tests run slower than that, and the timeout cut off a mutant that a
+# core test fails. The multiple keeps the margin as the suite grows, and the floor covers a
+# fast baseline; a real hang still ends, as a timeout.
+timeout_multiplier = 12
+minimum_test_timeout = 120
+
+# Mutants that no test can tell apart from the code, each with the reason. Names carry no line
+# numbers here, so an edit elsewhere in the file does not move them; check an entry again when
+# its function changes. A mutant that a test can catch gets the test instead.
+exclude_re = [
+  # `run` hands the terminal to the child from both sides of the fork, which is what removes
+  # the race (see `enter_own_process_group`). Without the child's side, the parent's still
+  # hands it over.
+  'run\.rs:\d+:\d+: replace Session::child_terminal -> Option<Handover> with None$',
+  # Job control: `bitfort run` started as a background job, and Ctrl-Z followed by `fg` or
+  # `bg`. Each needs a shell with job control on a terminal, which the tests do not drive.
+  'run\.rs:\d+:\d+: replace && with \|\| in Terminal::claimable$',
+  'run\.rs:\d+:\d+: replace Terminal::is_foreground -> bool with (true|false)$',
+  'run\.rs:\d+:\d+: replace == with != in Terminal::is_foreground$',
+  'run\.rs:\d+:\d+: replace && with \|\| in Terminal::restore$',
+  # `waitpid` failing. signal-hook installs its handlers with SA_RESTART, so EINTR does not
+  # reach here, and no test makes the call fail.
+  'run\.rs:\d+:\d+: replace < with (==|<=) in wait_for$',
+  'run\.rs:\d+:\d+: replace == with != in wait_for$',
+  # The directory fsync after a rename. Only a power loss between the rename and the fsync
+  # shows its effect.
+  'project\.rs:\d+:\d+: replace sync_dir with \(\)$',
+]

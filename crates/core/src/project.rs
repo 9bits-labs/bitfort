@@ -792,15 +792,6 @@ impl Project {
         git::repo_root(&self.root).is_some()
     }
 
-    /// Commit the `.bitfort` directory (roster, vault, config) with `message`, on the
-    /// user's behalf, so a write path can clear the "commit the roster first" wall without
-    /// making them drop to a shell (docs/SPEC.md §4.3). Commits only `.bitfort` paths, so
-    /// unrelated staged work is left alone. Returns `Err` if not inside a git work tree -
-    /// there is nothing to commit into, and the caller keeps its refusal.
-    pub fn commit_bitfort_dir(&self, message: &str) -> Result<()> {
-        self.commit_targets(message, &[self.bitfort_dir()])
-    }
-
     /// Initialize a git repository at the project root (`git init`), for the `init` wizard
     /// when the user opts into version control. A no-op on an already-initialized repo.
     pub fn init_git(&self) -> Result<()> {
@@ -809,20 +800,13 @@ impl Project {
 
     /// Commit the initial project - `.bitfort` plus the `.gitignore` that keeps `.env*`
     /// uncommittable (invariant 1) - for the `init` wizard, so a teammate cloning the repo
-    /// gets both the trust anchor and the dotenv guard. Like [`Self::commit_bitfort_dir`]
-    /// it commits only those paths and errs outside a git work tree.
+    /// gets both the trust anchor and the dotenv guard. It commits only those paths, so
+    /// unrelated staged work is left alone, and errs outside a git work tree.
     pub fn commit_init(&self, message: &str) -> Result<()> {
-        self.commit_targets(message, &[self.bitfort_dir(), self.root.join(".gitignore")])
-    }
-
-    /// Stage and commit exactly `targets` (each canonicalized and relativized to the repo
-    /// root) with `message`, leaving any other staged work untouched. Shared by the
-    /// commit-for-me wall and the `init` wizard.
-    fn commit_targets(&self, message: &str, targets: &[PathBuf]) -> Result<()> {
         let Some(root) = self.git_root() else {
             return Err(Error::Git("not inside a git repository".into()));
         };
-        let rels = targets
+        let rels = [self.bitfort_dir(), self.root.join(".gitignore")]
             .iter()
             .map(|t| relativize_under_root(&root, t))
             .collect::<Result<Vec<_>>>()?;

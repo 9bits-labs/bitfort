@@ -328,7 +328,7 @@ const EXCLUDE_STAGING: &str = ":(exclude)*.tmp*";
 
 /// Stage `pathspecs` (repo-root-relative) and commit just those paths with `message`.
 /// Any changes staged elsewhere in the index are left uncommitted, so committing on the
-/// user's behalf (the "commit-for-me" wall, docs/SPEC.md §4.3, and the `init` wizard) never
+/// user's behalf (the `init` wizard) never
 /// sweeps in their unrelated staged work. Reuses the hardened [`git`] runner so
 /// discovery-redirecting env vars can't retarget the commit at a decoy repo.
 pub fn stage_and_commit(repo_dir: &Path, pathspecs: &[&str], message: &str) -> Result<()> {

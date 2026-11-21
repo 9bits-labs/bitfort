@@ -6,9 +6,9 @@
 
 mod common;
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -47,18 +47,7 @@ fn signal_to_bitfort_is_forwarded_to_child() {
     assert!(killed.success(), "failed to signal bitfort");
 
     // bitfort should exit promptly (forwarded TERM kills the sleep), well before 10s.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "bitfort did not exit after being signaled"
-        );
-        sleep(Duration::from_millis(50));
-    };
-
+    let status = exit_within(&mut child, Duration::from_secs(5));
     assert_eq!(status.code(), Some(143), "expected 128 + SIGTERM(15)");
 }
 
@@ -107,17 +96,95 @@ fn our_process_group() -> i32 {
 #[test]
 fn a_child_on_a_terminal_can_still_read_stdin() {
     let f = init_project();
-    let (master, slave) = open_pty();
-
     let mut cmd = common::raw_bf(f.dir.path(), &f.id);
-    cmd.args(["run", "--", "sh", "-c", "read line; echo got:$line"])
-        .stdin(Stdio::from(slave.try_clone().unwrap()))
+    cmd.args(["run", "--", "sh", "-c", "read line; echo got:$line"]);
+    let transcript = transcript_on_terminal(cmd, b"ping\n", "got:ping");
+    assert!(
+        transcript.contains("got:ping"),
+        "the child never read the terminal (SIGTTIN would stop it): {transcript:?}"
+    );
+}
+
+/// When the child exits, `run` hands the terminal back to the group that held it. Otherwise
+/// the shell that started `bitfort` is a background group on its own terminal, and its next
+/// read from the terminal stops it with SIGTTIN.
+#[test]
+fn the_terminal_goes_back_to_the_group_that_held_it() {
+    let f = init_project();
+
+    // A shell leads the terminal's session, as a login shell does, and runs `bitfort` in its
+    // own group. When `run` returns, the shell prints the terminal's foreground group and its
+    // own group.
+    let mut cmd = common::with_identity("sh", f.dir.path(), &f.id);
+    cmd.args([
+        "-c",
+        r#""$0" run -- true; printf 'groups %s %s end\n' $(ps -o tpgid= -o pgid= -p $$)"#,
+    ])
+    .arg(assert_cmd::cargo::cargo_bin("bitfort"));
+    let transcript = transcript_on_terminal(cmd, b"", " end");
+    let groups: Vec<&str> = transcript
+        .split("groups")
+        .nth(1)
+        .unwrap_or_else(|| panic!("the shell printed no groups: {transcript:?}"))
+        .split_whitespace()
+        .take(2)
+        .collect();
+    assert_eq!(
+        groups[0], groups[1],
+        "the terminal's foreground group is not the shell's: {transcript:?}"
+    );
+}
+
+/// A signal aimed at `bitfort` goes to the child's whole process group. A shell killed while
+/// it waits for a command leaves that command running after `bitfort` has exited, with every
+/// secret in its environment.
+#[test]
+fn a_signal_to_bitfort_reaches_the_whole_group_of_the_child() {
+    let f = init_project();
+    let mut bitfort = common::raw_bf(f.dir.path(), &f.id)
+        .args(["run", "--", "sh", "-c", "sleep 30 & echo $!; wait"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(bitfort.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let grandchild: libc::pid_t = line.trim().parse().unwrap();
+
+    assert_eq!(
+        unsafe { libc::kill(bitfort.id() as libc::pid_t, libc::SIGTERM) },
+        0,
+        "failed to signal bitfort"
+    );
+    let status = exit_within(&mut bitfort, Duration::from_secs(5));
+    assert_eq!(status.code(), Some(143), "expected 128 + SIGTERM(15)");
+
+    // Signal 0 only checks that the process still exists.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while unsafe { libc::kill(grandchild, 0) } == 0 {
+        if Instant::now() >= deadline {
+            unsafe { libc::kill(grandchild, libc::SIGKILL) };
+            panic!("the child's own child outlived `bitfort run`");
+        }
+        sleep(Duration::from_millis(50));
+    }
+}
+
+/// Run `cmd` with a new pty as its stdio and as its *controlling* terminal, in a session of
+/// its own, write `input` to the terminal, and return what the terminal shows until `needle`
+/// appears or 10 s pass.
+///
+/// Without a controlling terminal there is no foreground process group, `tcsetpgrp` fails
+/// with ENOTTY, and SIGTTIN is never raised either - a test would pass without proving
+/// anything.
+fn transcript_on_terminal(mut cmd: Command, input: &[u8], needle: &str) -> String {
+    let (master, slave) = open_pty();
+    cmd.stdin(Stdio::from(slave.try_clone().unwrap()))
         .stdout(Stdio::from(slave.try_clone().unwrap()))
         .stderr(Stdio::from(slave.try_clone().unwrap()));
-    // Make the pty bitfort's *controlling* terminal, not merely its stdio. Without a
-    // controlling terminal there is no foreground process group, `tcsetpgrp` fails with
-    // ENOTTY, and SIGTTIN is never raised either - the test would pass without proving
-    // anything. Runs after std has dup2'd the stdio fds, so fd 0 is the pty slave.
+    // Runs after std has dup2'd the stdio fds, so fd 0 is the pty slave.
     //
     // SAFETY: the closure runs between fork and exec and calls only async-signal-safe
     // libc functions.
@@ -133,20 +200,31 @@ fn a_child_on_a_terminal_can_still_read_stdin() {
         });
     }
     let mut child = cmd.spawn().unwrap();
-    // Only bitfort holds the slave now; keeping it open here would stop the reads below
+    // Only the child holds the slave now; keeping it open here would stop the reads below
     // from ever seeing EOF.
     drop(slave);
 
     let mut master = std::fs::File::from(master);
-    master.write_all(b"ping\n").unwrap();
-
-    let transcript = read_until(&mut master, "got:ping", Duration::from_secs(10));
+    master.write_all(input).unwrap();
+    let transcript = read_until(&mut master, needle, Duration::from_secs(10));
     let _ = child.kill();
     let _ = child.wait();
-    assert!(
-        transcript.contains("got:ping"),
-        "the child never read the terminal (SIGTTIN would stop it): {transcript:?}"
-    );
+    transcript
+}
+
+/// Wait for `child` to exit, and fail the test if it still runs after `budget`.
+fn exit_within(child: &mut Child, budget: Duration) -> ExitStatus {
+    let deadline = Instant::now() + budget;
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "bitfort did not exit after being signaled"
+        );
+        sleep(Duration::from_millis(50));
+    }
 }
 
 /// Off a terminal there is no job control to join. Nothing put `bitfort` in a job and

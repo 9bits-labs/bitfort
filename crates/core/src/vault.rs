@@ -971,15 +971,16 @@ mod tests {
         v
     }
 
-    /// Exactly at the limit, and one byte over. The boundary is `>`, so a value of exactly
-    /// `VALUE_SIZE_WARN` bytes is not reported: the warning is about exceeding the limit.
+    /// Exactly at the limit docs/SPEC.md §4.4 gives (512 KiB), and one byte over. The boundary
+    /// is `>`, so a value of exactly 512 KiB is not reported: the warning is about exceeding
+    /// the limit. Spelled out rather than read from `VALUE_SIZE_WARN`, so a changed constant
+    /// fails here instead of moving the test with it.
     #[test]
     fn oversized_keys_reports_only_values_past_the_limit() {
         let mut v = Vault::new("development");
         v.set("SMALL", "x").unwrap();
-        v.set("AT_LIMIT", "x".repeat(VALUE_SIZE_WARN)).unwrap();
-        v.set("OVER_LIMIT", "x".repeat(VALUE_SIZE_WARN + 1))
-            .unwrap();
+        v.set("AT_LIMIT", "x".repeat(512 * 1024)).unwrap();
+        v.set("OVER_LIMIT", "x".repeat(512 * 1024 + 1)).unwrap();
 
         assert_eq!(v.oversized_keys(), vec!["OVER_LIMIT"]);
     }

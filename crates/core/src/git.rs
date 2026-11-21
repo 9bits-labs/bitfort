@@ -182,14 +182,23 @@ fn cat_file_batch(repo_dir: &Path, specs: &[String]) -> Result<Vec<Option<Vec<u8
 
 /// Parse `git cat-file --batch` output: per object either `<oid> <type> <size>\n<bytes>\n`
 /// or `<spec> missing\n`.
+///
+/// Exactly `expected` answers, or an error. Output with fewer or more answers than specs does
+/// not line up with them, and a revision dropped here lowers the anti-rollback ceiling with no
+/// error (invariant 3).
 fn parse_batch(stdout: &[u8], expected: usize) -> Result<Vec<Option<Vec<u8>>>> {
     let mut objects = Vec::with_capacity(expected);
     let mut pos = 0usize;
-    while pos < stdout.len() && objects.len() < expected {
-        let end = stdout[pos..]
-            .iter()
-            .position(|b| *b == b'\n')
-            .ok_or_else(|| Error::Git("git cat-file output ended mid-header".into()))?
+    while objects.len() < expected {
+        let end = stdout
+            .get(pos..)
+            .and_then(|rest| rest.iter().position(|b| *b == b'\n'))
+            .ok_or_else(|| {
+                Error::Git(format!(
+                    "git cat-file output ended after {} of {expected} answers",
+                    objects.len()
+                ))
+            })?
             + pos;
         let header = String::from_utf8_lossy(&stdout[pos..end]).into_owned();
         pos = end + 1;
@@ -210,6 +219,11 @@ fn parse_batch(stdout: &[u8], expected: usize) -> Result<Vec<Option<Vec<u8>>>> {
             .ok_or_else(|| Error::Git("git cat-file reported a size past its output".into()))?;
         objects.push(Some(stdout[pos..body_end].to_vec()));
         pos = body_end + 1; // skip the trailing newline git appends
+    }
+    if pos != stdout.len() {
+        return Err(Error::Git(format!(
+            "git cat-file output continues past {expected} answers"
+        )));
     }
     Ok(objects)
 }
@@ -314,7 +328,7 @@ const EXCLUDE_STAGING: &str = ":(exclude)*.tmp*";
 
 /// Stage `pathspecs` (repo-root-relative) and commit just those paths with `message`.
 /// Any changes staged elsewhere in the index are left uncommitted, so committing on the
-/// user's behalf (the "commit-for-me" wall, docs/SPEC.md §4.3, and the `init` wizard) never
+/// user's behalf (the `init` wizard) never
 /// sweeps in their unrelated staged work. Reuses the hardened [`git`] runner so
 /// discovery-redirecting env vars can't retarget the commit at a decoy repo.
 pub fn stage_and_commit(repo_dir: &Path, pathspecs: &[&str], message: &str) -> Result<()> {
@@ -711,5 +725,24 @@ mod tests {
     fn parse_batch_rejects_a_size_past_the_output() {
         let stdout = b"abc123 blob 999\nshort\n";
         assert!(parse_batch(stdout, 1).is_err());
+    }
+
+    #[test]
+    fn parse_batch_rejects_fewer_answers_than_specs() {
+        // A short answer used to come back as a short list, and `committed_blobs` would then
+        // compute the anti-rollback ceiling from fewer revisions than git has.
+        let err = parse_batch(b"abc123 blob 5\nhello\n", 2).unwrap_err();
+        assert!(err.to_string().contains("after 1 of 2 answers"), "{err}");
+        assert!(parse_batch(b"", 1).is_err());
+    }
+
+    #[test]
+    fn parse_batch_rejects_more_answers_than_specs() {
+        let stdout = b"abc123 blob 5\nhello\ndef456 blob 2\nhi\n";
+        let err = parse_batch(stdout, 1).unwrap_err();
+        assert!(
+            err.to_string().contains("continues past 1 answers"),
+            "{err}"
+        );
     }
 }

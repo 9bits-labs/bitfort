@@ -645,6 +645,29 @@ mod tests {
     }
 
     #[test]
+    fn a_predecessor_from_another_environment_or_project_is_rejected() {
+        // Each binding is checked on its own. Here the next roster really is an amendment of
+        // the foreign one (its `prev_digest` names it, and a maintainer signed it), so only
+        // the binding check stands between it and a chain that crosses environments.
+        let alice = Identity::generate().unwrap();
+        let (v1, anchor) = anchored_v1(&alice);
+        for edit in [
+            |r: &mut Roster| r.env = "staging".into(),
+            |r: &mut Roster| r.project_id = "0".repeat(32),
+        ] {
+            let mut foreign = v1.clone();
+            edit(&mut foreign);
+            let mut v2 = foreign.amend().unwrap();
+            v2.env = v1.env.clone();
+            v2.project_id = v1.project_id.clone();
+            v2.sign(&alice, "alice").unwrap();
+            assert!(v2
+                .verify(Some(&foreign), &anchor, 2, "development")
+                .is_err());
+        }
+    }
+
+    #[test]
     fn rogue_self_added_maintainer_is_rejected() {
         let alice = Identity::generate().unwrap();
         let mallory = Identity::generate().unwrap();

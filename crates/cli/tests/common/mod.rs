@@ -6,11 +6,12 @@
 //! one file doesn't touch would read as dead code in that binary.
 #![allow(dead_code)]
 
+use std::collections::BTreeSet;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
-use bitfort_core::{Identity, Roster, Vault};
+use bitfort_core::{clock, Identity, Member, Project, Role, Roster, Vault};
 use tempfile::TempDir;
 
 /// An initialized project plus the identity it was initialized with.
@@ -21,13 +22,7 @@ pub struct Fixture {
 
 /// A `bitfort` command rooted at `dir` with `id` supplied out-of-band as the identity.
 pub fn bf(dir: &Path, id: &Identity) -> Command {
-    let mut cmd = Command::cargo_bin("bitfort").unwrap();
-    cmd.current_dir(dir);
-    cmd.env("BITFORT_IDENTITY", id.enc_secret().as_str());
-    cmd.env("BITFORT_SIGN_IDENTITY", id.sign_secret().as_str());
-    // Make sure a stray file-based source in the environment can't shadow the pair above.
-    cmd.env_remove("BITFORT_IDENTITY_FILE");
-    cmd
+    Command::from_std(raw_bf(dir, id))
 }
 
 /// The same command as [`bf`], as a plain [`std::process::Command`].
@@ -35,10 +30,21 @@ pub fn bf(dir: &Path, id: &Identity) -> Command {
 /// [`bf`] returns an `assert_cmd::Command`, which runs the child to completion, so a test
 /// that has to signal `bitfort` while it waits, or hand it a pty, needs the raw type.
 pub fn raw_bf(dir: &Path, id: &Identity) -> std::process::Command {
-    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("bitfort"));
+    with_identity(assert_cmd::cargo::cargo_bin("bitfort"), dir, id)
+}
+
+/// `program` rooted at `dir`, with the environment [`bf`] gives `bitfort`, for a test that
+/// starts `bitfort` from another program, such as a shell.
+pub fn with_identity(
+    program: impl AsRef<std::ffi::OsStr>,
+    dir: &Path,
+    id: &Identity,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
     cmd.current_dir(dir);
     cmd.env("BITFORT_IDENTITY", id.enc_secret().as_str());
     cmd.env("BITFORT_SIGN_IDENTITY", id.sign_secret().as_str());
+    // Make sure a stray file-based source in the environment can't shadow the pair above.
     cmd.env_remove("BITFORT_IDENTITY_FILE");
     cmd
 }
@@ -60,20 +66,27 @@ pub fn init_git_project() -> Fixture {
     f
 }
 
-/// Run a git command in `dir`, asserting success. Identity is supplied via env so no
-/// global git config is required on the runner.
-pub fn git(dir: &Path, args: &[&str]) {
-    let ok = std::process::Command::new("git")
-        .arg("-C")
+/// A git command in `dir`. Identity is supplied via env so no global git config is required
+/// on the runner.
+///
+/// `maintenance.auto=false` stops a commit or a merge from starting `git maintenance` in the
+/// background. That process creates and deletes `.git/objects/maintenance.lock` after git
+/// returns, so a test that lists the repository and then copies each file can find the lock
+/// gone.
+pub fn git_command(dir: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["-c", "maintenance.auto=false", "-C"])
         .arg(dir)
-        .args(args)
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@e.com")
         .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@e.com")
-        .status()
-        .unwrap()
-        .success();
+        .env("GIT_COMMITTER_EMAIL", "t@e.com");
+    cmd
+}
+
+/// Run a git command in `dir`, asserting success.
+pub fn git(dir: &Path, args: &[&str]) {
+    let ok = git_command(dir).args(args).status().unwrap().success();
     assert!(ok, "git {args:?} failed");
 }
 
@@ -86,25 +99,46 @@ pub fn git_commit_all(dir: &Path, msg: &str) {
 /// Run a git command that is allowed to fail (e.g. a `merge` that conflicts), returning
 /// whether it succeeded.
 pub fn git_try(dir: &Path, args: &[&str]) -> bool {
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@e.com")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@e.com")
-        .status()
-        .unwrap()
-        .success()
+    git_command(dir).args(args).status().unwrap().success()
 }
 
-/// The environment's `vault.enc` path, through the same API the tool uses, so the on-disk
-/// layout is not spelled out again in each test file.
+/// The project, through the same API the tool uses, so the on-disk layout is not spelled out
+/// again in each test file.
+pub fn project(dir: &Path) -> Project {
+    Project::discover(dir).unwrap()
+}
+
+/// The environment's `vault.enc` path.
 pub fn vault_path(dir: &Path, env: &str) -> PathBuf {
-    bitfort_core::Project::discover(dir)
-        .unwrap()
-        .vault_path(env)
+    project(dir).vault_path(env)
+}
+
+/// A roster member built from `identity`, added by itself just now.
+pub fn member(identity: &Identity, name: &str, role: Role) -> Member {
+    Member {
+        name: name.into(),
+        enc_pubkey: identity.enc_pubkey(),
+        sign_pubkey: identity.sign_pubkey(),
+        role,
+        added_by: name.into(),
+        added_at: clock::now_rfc3339(),
+    }
+}
+
+/// The environment's roster plus one member built from `identity`, for the attacks that need
+/// a key the real `keys.json` does not list. Persists nothing.
+pub fn roster_plus(dir: &Path, env: &str, identity: &Identity, name: &str, role: Role) -> Roster {
+    let mut roster = project(dir).load_roster(env).unwrap();
+    roster.members.push(member(identity, name, role));
+    roster
+}
+
+/// Overwrite the environment's `vault.enc` with one `mallory` signed, encrypted to the real
+/// roster's recipients. This is what repo write access alone buys an attacker: every
+/// `enc_pubkey` in `keys.json` is public, so the file decrypts for the real members.
+pub fn forge_vault(dir: &Path, env: &str, mallory: &Identity, vars: &[(&str, &str)]) {
+    let forged = roster_plus(dir, env, mallory, "mallory", Role::Maintainer);
+    write_vault(dir, env, &forged, mallory, vars);
 }
 
 /// Overwrite the environment's `vault.enc` with one `signer` signed, encrypted to `roster`.
@@ -163,6 +197,68 @@ pub fn invite_for(id: &Identity, name: &str) -> String {
     bitfort_core::Invite::from_identity(id, name)
         .encode()
         .unwrap()
+}
+
+/// `--help` for a command path, e.g. `[]` for the root or `["member"]` for a group.
+pub fn help_for(path: &[&str]) -> String {
+    let mut cmd = Command::cargo_bin("bitfort").unwrap();
+    cmd.args(path);
+    cmd.arg("--help");
+    let out = cmd.output().expect("failed to run bitfort");
+    String::from_utf8(out.stdout).expect("help output is not UTF-8")
+}
+
+/// Parse the `Commands:` block of a `--help` page into the subcommand names it lists, leaving
+/// out clap's own `help`, which is not a `bitfort` command.
+///
+/// clap indents each entry by two spaces and puts the name first, so the name is the first
+/// token of an indented line. The block ends at the next unindented line (`Options:`).
+pub fn subcommands(help: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut inside = false;
+    for line in help.lines() {
+        if line.starts_with("Commands:") {
+            inside = true;
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        // A blank line inside the block separates entries; a non-indented line ends it.
+        if line.trim().is_empty() {
+            continue;
+        }
+        if !line.starts_with("  ") {
+            break;
+        }
+        let Some(name) = line.split_whitespace().next() else {
+            continue;
+        };
+        // Continuation lines of a wrapped description are indented further and start
+        // lowercase mid-sentence; a real entry is a bare word at exactly two spaces.
+        if line.starts_with("   ") {
+            continue;
+        }
+        if name != "help" && name.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
+/// Every command path the binary accepts, as space-joined strings ("run", "member add"), read
+/// from `--help`.
+pub fn command_paths() -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    for top in subcommands(&help_for(&[])) {
+        let nested = subcommands(&help_for(&[&top]));
+        if nested.is_empty() {
+            found.insert(top);
+        } else {
+            found.extend(nested.iter().map(|sub| format!("{top} {sub}")));
+        }
+    }
+    found
 }
 
 /// A pty pair, with the master set non-blocking so a test can read with a deadline instead

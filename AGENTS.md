@@ -58,7 +58,9 @@ and say so in the report. A new command that handles secrets gets a `watch` line
 
 **CI.** `.github/workflows/ci.yml` runs step 1 on Linux, and `cargo test` plus
 `check-heap-wipe.sh` on macOS, for each pull request and each push to `main`; `lint.yml` lints
-the workflows. `release.yml` builds the release archives (macOS and static-musl Linux, arm64 and
+the workflows. `mutants.yml` runs cargo-mutants on the lines each pull request changes, and on
+the whole scope each week; `.cargo/mutants.toml` sets the scope and says what to do with a
+missed mutant. `release.yml` builds the release archives (macOS and static-musl Linux, arm64 and
 x86_64) and the Homebrew formula with dist (`dist-workspace.toml`) on each pull request, and
 publishes them on a version tag; its header lists the hand edits that `dist generate` would
 undo. CI does not replace this loop: it does not drive the command you changed, and it runs no
@@ -96,10 +98,14 @@ cargo test -p bitfort-core version_is_reported   # one test by name
 cargo run -p bitfort-cli -- --version            # run the CLI without building a path
 cargo build --release                            # optimized binary at target/release/bitfort
 ./scripts/check-cli-build.sh                     # dependency audit (see invariant 5)
+cargo mutants -j 4 --in-diff <(git diff "$(git merge-base main HEAD)")  # lines you changed
 ```
 
 Test harnesses arrive with the code that needs them: `assert_cmd` + `tempfile` are in use for the
 CLI e2e suite; `insta` for on-disk format snapshots is still not a dependency.
+`crates/cli/tests/tamper_matrix.rs` runs every command against every kind of tampered signed
+file. A new command gets a row there (the test fails until it has one), and a new way to tamper
+with a signed file gets a `Tamper` entry.
 
 ## Security invariants (what the loop guards)
 

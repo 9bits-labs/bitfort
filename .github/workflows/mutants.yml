@@ -1,0 +1,94 @@
+# Mutation testing with cargo-mutants: the mutants in the lines a pull request changes, and
+# each week every mutant in the scope. .cargo/mutants.toml sets the scope and says what to do
+# with a missed mutant, which fails the job.
+name: mutants
+
+on:
+  pull_request:
+    branches: [main]
+    # Only Rust source can hold a mutant; other changes leave the diff with none to test.
+    paths:
+      - "**/*.rs"
+      - .cargo/mutants.toml
+      - .github/workflows/mutants.yml
+  schedule:
+    # Mondays, 04:17 UTC.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels the run for the older one.
+concurrency:
+  group: mutants-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: never
+  # `cargo install` builds it once; rust-cache keeps ~/.cargo/bin, so later runs skip the
+  # build. Nothing updates this pin, so bump it by hand. The name has no `CARGO` prefix,
+  # because rust-cache hashes those variables into its key.
+  MUTANTS_VERSION: 27.1.0
+
+jobs:
+  diff:
+    name: mutants in the diff
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The diff is taken against the base branch, which a shallow checkout does not have.
+          fetch-depth: 0
+      - run: rustup toolchain install stable --profile minimal
+      # One cache for both jobs, saved by the weekly run on main, where every pull request
+      # can read it.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: mutants
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo install --locked "cargo-mutants@${MUTANTS_VERSION}"
+      # Three dots: from the merge base, so commits that reached main after the branch
+      # started do not count as changes of this pull request.
+      - run: git diff "origin/${GITHUB_BASE_REF}...HEAD" > "${RUNNER_TEMP}/pr.diff"
+      - run: cargo mutants --no-shuffle -vV --in-place --in-diff "${RUNNER_TEMP}/pr.diff"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: mutants-diff
+          path: mutants.out
+          if-no-files-found: ignore
+
+  full:
+    name: mutants shard ${{ matrix.shard }}
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      # Every shard finishes, so one run reports every missed mutant.
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: mutants
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo install --locked "cargo-mutants@${MUTANTS_VERSION}"
+      - run: cargo mutants --no-shuffle -vV --in-place --shard "${SHARD}/${SHARDS}" --sharding round-robin
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants.out
+          if-no-files-found: ignore

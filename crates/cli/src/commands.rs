@@ -50,8 +50,9 @@ pub fn init(ui: &Ui, start: Option<&Path>, name: Option<String>) -> Result<()> {
     // This name becomes the first roster member, so the same rule applies as for an invite.
     // A `--name` the rule refuses is an error, because the user can correct it and retry; a
     // typed answer is re-asked instead, like the environment prompt below. Off a terminal
-    // `prompt` returns the default, which `resolve_name` has already checked, so this cannot
-    // loop.
+    // `prompt` returns the default every time, so a default the rule refuses is an error
+    // there too: asking again would never end. `resolve_name` checks every default except
+    // its last fallback, `owner`.
     let name = match name.filter(|n| !n.trim().is_empty()) {
         Some(n) => {
             let n = n.trim().to_string();
@@ -60,14 +61,15 @@ pub fn init(ui: &Ui, start: Option<&Path>, name: Option<String>) -> Result<()> {
         }
         None => loop {
             let candidate = ui.prompt("Your name?", &resolve_name(None));
-            if bitfort_core::roster::validate_member_name(&candidate).is_ok() {
-                break candidate;
+            match bitfort_core::roster::validate_member_name(&candidate) {
+                Ok(()) => break candidate,
+                Err(e) if !ui.can_prompt() => return Err(e.into()),
+                Err(_) => ui.status(
+                    Level::Warn,
+                    "invalid",
+                    "use printable ASCII, at most 64 characters",
+                )?,
             }
-            ui.status(
-                Level::Warn,
-                "invalid",
-                "use printable ASCII, at most 64 characters",
-            )?;
         },
     };
     // First environment: prompt (default `development`), re-asking until it's a valid name.
@@ -763,6 +765,14 @@ pub fn env_add(start: Option<&Path>, name: &str) -> Result<()> {
             project.env_dir(name).display()
         );
     }
+    // Every existing roster verifies before anything is written, as on every other write path
+    // (docs/SPEC.md §5.5). The holder's display name is read from them, and a write into a
+    // tampered project would otherwise pass without a word.
+    let rosters = config
+        .environments
+        .iter()
+        .map(|env| verify_or_refuse(&project, env, &format!("create '{name}'")).map(|v| v.roster))
+        .collect::<Result<Vec<_>>>()?;
 
     let identity = load_identity()?;
     // v1 verification requires a maintainer whose two-key anchor equals the pinned anchor
@@ -776,8 +786,7 @@ pub fn env_add(start: Option<&Path>, name: &str) -> Result<()> {
     }
 
     // Reuse the holder's existing display name so it stays consistent across environments.
-    let holder_name =
-        anchor_member_name(&project, &config, &identity).unwrap_or_else(|| resolve_name(None));
+    let holder_name = anchor_member_name(&rosters, &identity).unwrap_or_else(|| resolve_name(None));
     // This name becomes the sole member of a fresh signed roster, so the same rule applies as
     // for an invite. A name reused from an older environment can predate the rule, so the
     // message says where it came from: the repair is in that roster, not in this command.
@@ -1757,28 +1766,32 @@ fn open(start: Option<&Path>, env: Option<&str>) -> Result<Opened> {
     })
 }
 
+/// Verify `env`'s roster, refusing on failure, and report an anti-rollback witness that could
+/// not run here. `action` names what is being refused.
+///
+/// Every path verifies now, reads included. The old design warned and continued on read
+/// paths because the chain was reconstructed from git history, which is unavailable in a
+/// shallow clone or outside a repository. The chain lives in `chain.json` now, so
+/// verification always works and there is nothing left to degrade to - and a read path
+/// that continues past a failed roster is exactly how a forged roster reaches `run`.
+///
+/// The rollback warning belongs here rather than at the read paths: `set`, `import`,
+/// `rotate`, `resolve`, `env add` and the membership commands all write in a shallow clone,
+/// and they used to do it with no word that anti-rollback was off.
+fn verify_or_refuse(project: &bitfort_core::Project, env: &str, action: &str) -> Result<Verified> {
+    let verified = project
+        .verify_roster(env)
+        .with_context(|| format!("roster verification failed for '{env}'; refusing to {action}"))?;
+    if let Some(why) = verified.guard.warning() {
+        eprintln!("warning: {why}");
+    }
+    Ok(verified)
+}
+
 impl Opened {
-    /// Verify the roster, refusing on failure, and report an anti-rollback witness that could
-    /// not run here. `action` names what is being refused.
-    ///
-    /// Every path verifies now, reads included. The old design warned and continued on read
-    /// paths because the chain was reconstructed from git history, which is unavailable in a
-    /// shallow clone or outside a repository. The chain lives in `chain.json` now, so
-    /// verification always works and there is nothing left to degrade to - and a read path
-    /// that continues past a failed roster is exactly how a forged roster reaches `run`.
-    ///
-    /// The rollback warning belongs here rather than at the read paths: `set`, `import`,
-    /// `rotate`, `resolve` and the membership commands all change the roster or the vault in a
-    /// shallow clone, and they used to do it with no word that anti-rollback was off.
+    /// [`verify_or_refuse`] for the environment this command acts on.
     fn verified(&self, action: &str) -> Result<Verified> {
-        let verified = self
-            .project
-            .verify_roster(&self.env)
-            .with_context(|| format!("roster verification failed; refusing to {action}"))?;
-        if let Some(why) = verified.guard.warning() {
-            eprintln!("warning: {why}");
-        }
-        Ok(verified)
+        verify_or_refuse(&self.project, &self.env, action)
     }
 
     /// The whole prologue of a read command: verify the roster, load the identity, and open
@@ -2169,22 +2182,14 @@ fn reencrypt_to_new_roster(
     Ok(())
 }
 
-/// The display name the anchor holder already uses in an existing environment (matched
+/// The display name the anchor holder already uses in one of the verified `rosters` (matched
 /// by signing key), so new environments reuse it instead of re-deriving from `$USER`.
-fn anchor_member_name(
-    project: &bitfort_core::Project,
-    config: &Config,
-    identity: &Identity,
-) -> Option<String> {
+fn anchor_member_name(rosters: &[Roster], identity: &Identity) -> Option<String> {
     let sign_pubkey = identity.sign_pubkey();
-    for env in &config.environments {
-        if let Ok(roster) = project.load_roster(env) {
-            if let Some(m) = roster.member_by_sign_pubkey(&sign_pubkey) {
-                return Some(m.name.clone());
-            }
-        }
-    }
-    None
+    rosters
+        .iter()
+        .find_map(|roster| roster.member_by_sign_pubkey(&sign_pubkey))
+        .map(|m| m.name.clone())
 }
 
 fn resolve_name(explicit: Option<String>) -> String {

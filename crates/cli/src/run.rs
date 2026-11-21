@@ -334,7 +334,12 @@ fn wait_for(pid: libc::pid_t, target: libc::pid_t, terminal: Option<&Terminal>) 
 #[cfg(not(unix))]
 struct Session;
 
+// No build of the tests compiles this impl, so every mutant of it would survive. cargo-mutants
+// reads `mutants::skip` from the source without evaluating the condition. The compiler never
+// expands it, because the impl exists only where `unix` is false, so no `mutants` crate is
+// needed.
 #[cfg(not(unix))]
+#[cfg_attr(unix, mutants::skip)]
 impl Session {
     fn open() -> Result<Self> {
         Ok(Self)

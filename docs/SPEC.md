@@ -525,7 +525,7 @@ Binary: `bitfort`. All commands operate on the `.bitfort/` dir found by walking 
 | `bitfort export [--format dotenv\|shell\|json] [--force]` | Print decrypted secrets (explicit, for CI bridges). Warns loudly; refuses to print to a terminal without `--force`. |
 | `bitfort env add <name>` | Create a new environment (own roster + vault), rooted at the same trust anchor. Anchor-holder only. |
 | `bitfort env list` | List environments and per-env roster/verification status. |
-| `bitfort member add <invite> [--maintainer] [--name <n>]` | (maintainer) Add recipient to the target env, bump+sign roster, re-encrypt. Requires the current roster to be committed. A display name must be printable ASCII (U+0020 to U+007E) of at most 64 characters, so it cannot forge a row in `member list` nor impersonate another member with an invisible character. |
+| `bitfort member add <invite> [--maintainer] [--name <n>]` / `bitfort member add --agent <name> [--force]` | (maintainer) Add recipient to the target env, bump+sign roster, re-encrypt. With `--agent`, mint the recipient's identity, add it as a plain member, and print its secrets (§7.2). Requires the current roster to be committed. A display name must be printable ASCII (U+0020 to U+007E) of at most 64 characters, so it cannot forge a row in `member list` nor impersonate another member with an invisible character. |
 | `bitfort member rm <name>` | (maintainer) Remove recipient, bump+sign roster, re-encrypt (see rotate). Refuses the last maintainer. Confirms first (skip with `-y`). |
 | `bitfort member list` | Show the target env's verified roster. Refuses a roster that does not verify (§5.5). |
 | `bitfort rotate` | Re-encrypt vault to current roster with fresh ciphertext; advises rotating the upstream values via `bitfort set`. |
@@ -535,8 +535,9 @@ Binary: `bitfort`. All commands operate on the `.bitfort/` dir found by walking 
 
 Global flags: `--env <name>` (selects environment; default `config.default_env`), `--dir <path>`,
 `--json` (JSON output on `status`, `list`, `verify`, `anchor`, `member list`, `env list` and
-`identity new`; other commands keep their text output, no command asks a question under it, and
-the terminal guards on `export` and `identity new` still refuse a terminal), `-y`/`--yes` (skip the confirmation on
+`identity new` and `member add --agent`; other commands keep their text output, no command asks
+a question under it, and the terminal guards on `export`, `identity new` and `member add --agent`
+still refuse a terminal), `-y`/`--yes` (skip the confirmation on
 destructive commands - `unset`, `member rm`, overwriting `set`; required off an interactive
 terminal), `-q`/`--quiet` (drop decorative output, keeping facts/data/errors).
 Almost every command is environment-scoped; `--env` selects which roster+vault under
@@ -692,7 +693,7 @@ CI-provider integrations, only a documented recipe:
    the identity-file loader requires; writing over an existing file keeps that file's mode, so
    `chmod 600` it.
    `keygen` cannot serve here: it is idempotent, so it returns the operator's own identity, and
-   no command but `identity new` prints private key material.
+   only `identity new` and `member add --agent` (§7.2) print private key material.
 2. Store both halves as secrets in the CI platform (GitHub Actions secret, GitLab CI variable,
    etc.), exposed to the job as `BITFORT_IDENTITY` and `BITFORT_SIGN_IDENTITY`. The printed text
    block is also a valid `BITFORT_IDENTITY_FILE` if the platform mounts files instead; the
@@ -710,6 +711,37 @@ Messaging discipline (secret zero): the honest pitch is "store **one** rotatable
 secret store instead of pasting **N** plaintext secrets into a dashboard, and keep every
 environment in sync from one Git-tracked vault." BitFort does not eliminate the CI platform's
 root-of-trust; it consolidates and versions it. See the threat model (§2) and §8.
+
+### 7.2 AI agents
+
+A cloud agent (a coding agent that runs on a vendor's machines) is a headless consumer like a
+CI job, so it uses the same mechanism: one identity, given to the agent's launcher as
+`BITFORT_IDENTITY` and `BITFORT_SIGN_IDENTITY`. `bitfort member add --agent <name>` makes that
+identity in one step:
+
+1. It mints a fresh identity, as `identity new` does, and never touches the keyring.
+2. It adds that identity to the target environment (`--env`) as a plain member, signed by the
+   maintainer who runs it, and re-encrypts the vault. No other environment changes, so the agent
+   is a recipient of that environment only (§4.1).
+3. It prints the two secrets to stdout: an identity file with a comment that names the agent,
+   its environment and the `member rm` command that revokes it, or under `--json` one object
+   with `BITFORT_IDENTITY`, `BITFORT_SIGN_IDENTITY`, `name`, `env` and `roster_version`. The
+   guard of `identity new` applies and runs before the key exists: stdout on a terminal is
+   refused without `--force`. Status lines and a warning go to stderr.
+
+`bitfort member rm <name>` revokes the agent like any member (§8). A cloud agent does not share
+the developer's keyring, so the environment boundary holds there. An agent that runs on the
+developer's own machine, as the developer's user, gets only the protection the OS keyring gives
+the developer's identity (§2), and that identity opens every environment the developer is a
+member of. Run such an agent as another user or in a container that holds only its own identity.
+
+The agent is a member, so it can also write the vault of its environment. Each vault revision it
+writes carries its signature, and a reader resolves the author from the roster (§4.4). A
+read-only member role is not in v1.
+
+If the secrets cannot be written after the roster changed, the command fails, says that the
+agent is now a member whose key was not printed, and names the `member rm` command that removes
+it.
 
 ---
 

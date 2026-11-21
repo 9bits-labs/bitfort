@@ -66,20 +66,27 @@ pub fn init_git_project() -> Fixture {
     f
 }
 
-/// Run a git command in `dir`, asserting success. Identity is supplied via env so no
-/// global git config is required on the runner.
-pub fn git(dir: &Path, args: &[&str]) {
-    let ok = std::process::Command::new("git")
-        .arg("-C")
+/// A git command in `dir`. Identity is supplied via env so no global git config is required
+/// on the runner.
+///
+/// `maintenance.auto=false` stops a commit or a merge from starting `git maintenance` in the
+/// background. That process creates and deletes `.git/objects/maintenance.lock` after git
+/// returns, so a test that lists the repository and then copies each file can find the lock
+/// gone.
+pub fn git_command(dir: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["-c", "maintenance.auto=false", "-C"])
         .arg(dir)
-        .args(args)
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@e.com")
         .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@e.com")
-        .status()
-        .unwrap()
-        .success();
+        .env("GIT_COMMITTER_EMAIL", "t@e.com");
+    cmd
+}
+
+/// Run a git command in `dir`, asserting success.
+pub fn git(dir: &Path, args: &[&str]) {
+    let ok = git_command(dir).args(args).status().unwrap().success();
     assert!(ok, "git {args:?} failed");
 }
 
@@ -92,17 +99,7 @@ pub fn git_commit_all(dir: &Path, msg: &str) {
 /// Run a git command that is allowed to fail (e.g. a `merge` that conflicts), returning
 /// whether it succeeded.
 pub fn git_try(dir: &Path, args: &[&str]) -> bool {
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@e.com")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@e.com")
-        .status()
-        .unwrap()
-        .success()
+    git_command(dir).args(args).status().unwrap().success()
 }
 
 /// The project, through the same API the tool uses, so the on-disk layout is not spelled out

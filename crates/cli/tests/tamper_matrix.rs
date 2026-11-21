@@ -543,6 +543,22 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// `copy_project` lists the files of a repository and then copies each one, so no process
+/// may still change the repository after the git command that made it returns.
+#[test]
+fn a_test_git_commit_starts_no_background_process() {
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q"]);
+    let out = git_command(dir.path())
+        .args(["commit", "-q", "--allow-empty", "-m", "c"])
+        .env("GIT_TRACE", "1")
+        .output()
+        .unwrap();
+    let trace = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{trace}");
+    assert!(!trace.contains("maintenance"), "{trace}");
+}
+
 /// A copy of the project at `from`, its git repository included.
 fn copy_project(from: &Path) -> TempDir {
     let to = tempfile::tempdir().unwrap();

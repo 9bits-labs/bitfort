@@ -50,8 +50,9 @@ pub fn init(ui: &Ui, start: Option<&Path>, name: Option<String>) -> Result<()> {
     // This name becomes the first roster member, so the same rule applies as for an invite.
     // A `--name` the rule refuses is an error, because the user can correct it and retry; a
     // typed answer is re-asked instead, like the environment prompt below. Off a terminal
-    // `prompt` returns the default, which `resolve_name` has already checked, so this cannot
-    // loop.
+    // `prompt` returns the default every time, so a default the rule refuses is an error
+    // there too: asking again would never end. `resolve_name` checks every default except
+    // its last fallback, `owner`.
     let name = match name.filter(|n| !n.trim().is_empty()) {
         Some(n) => {
             let n = n.trim().to_string();
@@ -60,14 +61,15 @@ pub fn init(ui: &Ui, start: Option<&Path>, name: Option<String>) -> Result<()> {
         }
         None => loop {
             let candidate = ui.prompt("Your name?", &resolve_name(None));
-            if bitfort_core::roster::validate_member_name(&candidate).is_ok() {
-                break candidate;
+            match bitfort_core::roster::validate_member_name(&candidate) {
+                Ok(()) => break candidate,
+                Err(e) if !ui.can_prompt() => return Err(e.into()),
+                Err(_) => ui.status(
+                    Level::Warn,
+                    "invalid",
+                    "use printable ASCII, at most 64 characters",
+                )?,
             }
-            ui.status(
-                Level::Warn,
-                "invalid",
-                "use printable ASCII, at most 64 characters",
-            )?;
         },
     };
     // First environment: prompt (default `development`), re-asking until it's a valid name.

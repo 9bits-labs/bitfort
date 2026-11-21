@@ -6,15 +6,12 @@
 //! reader with no way forward. These tests compare the page against the binary in both
 //! directions, so the drift fails `cargo test` instead of reaching a user.
 
+mod common;
+
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use assert_cmd::Command;
-
-/// Commands whose absence from the reference is deliberate.
-///
-/// `help` is clap's own, and documenting it would be documenting clap.
-const NOT_DOCUMENTED: &[&str] = &["help"];
+use common::{command_paths, help_for};
 
 fn reference_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -25,74 +22,6 @@ fn reference_path() -> PathBuf {
 
 fn reference_text() -> String {
     std::fs::read_to_string(reference_path()).expect("failed to read the CLI reference")
-}
-
-/// `--help` for a command path, e.g. `[]` for the root or `["member"]` for a group.
-fn help_for(path: &[&str]) -> String {
-    let mut cmd = Command::cargo_bin("bitfort").unwrap();
-    cmd.args(path);
-    cmd.arg("--help");
-    let out = cmd.output().expect("failed to run bitfort");
-    String::from_utf8(out.stdout).expect("help output is not UTF-8")
-}
-
-/// Parse the `Commands:` block of a `--help` page into the subcommand names it lists.
-///
-/// clap indents each entry by two spaces and puts the name first, so the name is the first
-/// token of an indented line. The block ends at the next unindented line (`Options:`).
-fn subcommands(help: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    let mut inside = false;
-    for line in help.lines() {
-        if line.starts_with("Commands:") {
-            inside = true;
-            continue;
-        }
-        if !inside {
-            continue;
-        }
-        // A blank line inside the block separates entries; a non-indented line ends it.
-        if line.trim().is_empty() {
-            continue;
-        }
-        if !line.starts_with("  ") {
-            break;
-        }
-        let Some(name) = line.split_whitespace().next() else {
-            continue;
-        };
-        // Continuation lines of a wrapped description are indented further and start
-        // lowercase mid-sentence; a real entry is a bare word at exactly two spaces.
-        if line.starts_with("   ") {
-            continue;
-        }
-        if name.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
-            names.push(name.to_string());
-        }
-    }
-    names
-}
-
-/// Every command path the binary accepts, as space-joined strings ("run", "member add").
-fn binary_commands() -> BTreeSet<String> {
-    let mut found = BTreeSet::new();
-    for top in subcommands(&help_for(&[])) {
-        if NOT_DOCUMENTED.contains(&top.as_str()) {
-            continue;
-        }
-        let nested = subcommands(&help_for(&[&top]));
-        if nested.is_empty() {
-            found.insert(top);
-        } else {
-            for sub in nested {
-                if NOT_DOCUMENTED.contains(&sub.as_str()) {
-                    continue;
-                }
-                found.insert(format!("{top} {sub}"));
-            }
-        }
-    }
-    found
 }
 
 /// Every command path the reference documents, read from its `### \`bitfort ...\`` headings.
@@ -124,7 +53,7 @@ fn documented_commands(text: &str) -> BTreeSet<String> {
 
 #[test]
 fn reference_documents_every_command() {
-    let missing: Vec<_> = binary_commands()
+    let missing: Vec<_> = command_paths()
         .difference(&documented_commands(&reference_text()))
         .cloned()
         .collect();
@@ -138,7 +67,7 @@ fn reference_documents_every_command() {
 #[test]
 fn reference_invents_no_command() {
     let invented: Vec<_> = documented_commands(&reference_text())
-        .difference(&binary_commands())
+        .difference(&command_paths())
         .cloned()
         .collect();
     assert!(
@@ -152,7 +81,7 @@ fn reference_invents_no_command() {
 fn reference_names_every_long_flag() {
     let text = reference_text();
     let mut missing = Vec::new();
-    for path in binary_commands() {
+    for path in command_paths() {
         let args: Vec<&str> = path.split(' ').collect();
         for line in help_for(&args).lines() {
             let trimmed = line.trim_start();

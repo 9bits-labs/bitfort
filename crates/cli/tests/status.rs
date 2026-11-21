@@ -85,6 +85,7 @@ fn every_write_path_reports_an_absent_rollback_witness() {
         vec!["unset", "API_KEY", "--yes"],
         vec!["member", "add", &invite],
         vec!["member", "rm", "bob", "--yes"],
+        vec!["env", "add", "staging"],
     ] {
         bf(f.dir.path(), &f.id)
             .args(&args)

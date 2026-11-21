@@ -5,42 +5,12 @@
 mod common;
 
 use std::fs;
-use std::path::Path;
 
-use bitfort_core::{clock, Identity, Member, Role, Roster, Vault};
+use bitfort_core::{Identity, Role, Vault};
 use common::*;
 use predicates::prelude::*;
 
 const ENV: &str = "development";
-
-/// The project, through the same API the tool uses, so the on-disk layout is not spelled out
-/// again here.
-fn project(dir: &Path) -> bitfort_core::Project {
-    bitfort_core::Project::discover(dir).unwrap()
-}
-
-/// The project's roster plus one member built from `identity`, for the attacks that need a key
-/// the real `keys.json` does not list.
-fn roster_plus(dir: &Path, identity: &Identity, name: &str, role: Role) -> Roster {
-    let mut roster = project(dir).load_roster(ENV).unwrap();
-    roster.members.push(Member {
-        name: name.into(),
-        enc_pubkey: identity.enc_pubkey(),
-        sign_pubkey: identity.sign_pubkey(),
-        role,
-        added_by: name.into(),
-        added_at: clock::now_rfc3339(),
-    });
-    roster
-}
-
-/// Overwrite the project's `vault.enc` with one `mallory` signed, encrypted to the real
-/// roster's recipients. This is what repo write access alone buys an attacker: every
-/// `enc_pubkey` in `keys.json` is public, so the file decrypts for the real members.
-fn forge_vault(dir: &Path, mallory: &Identity, vars: &[(&str, &str)]) {
-    let forged = roster_plus(dir, mallory, "mallory", Role::Maintainer);
-    write_vault(dir, ENV, &forged, mallory, vars);
-}
 
 /// A committed project holding `API_KEY=bob-knows-this`, with bob a member. Returns bob's
 /// identity and the vault as it stands while he can still read it.
@@ -70,7 +40,12 @@ fn run_refuses_a_vault_no_member_signed() {
         .success();
 
     let mallory = Identity::generate().unwrap();
-    forge_vault(f.dir.path(), &mallory, &[("LD_PRELOAD", "/tmp/evil.so")]);
+    forge_vault(
+        f.dir.path(),
+        ENV,
+        &mallory,
+        &[("LD_PRELOAD", "/tmp/evil.so")],
+    );
 
     bf(f.dir.path(), &f.id)
         .args(["run", "--", "printenv", "LD_PRELOAD"])
@@ -91,7 +66,7 @@ fn run_refuses_a_vault_encrypted_to_a_key_outside_the_roster() {
         .success();
 
     let outsider = Identity::generate().unwrap();
-    let widened = roster_plus(f.dir.path(), &outsider, "outsider", Role::Member);
+    let widened = roster_plus(f.dir.path(), ENV, &outsider, "outsider", Role::Member);
     write_vault(f.dir.path(), ENV, &widened, &f.id, &[("API_KEY", "real")]);
 
     bf(f.dir.path(), &f.id)
@@ -110,7 +85,7 @@ fn every_read_path_refuses_a_forged_vault() {
         .success();
 
     let mallory = Identity::generate().unwrap();
-    forge_vault(f.dir.path(), &mallory, &[("API_KEY", "attacker")]);
+    forge_vault(f.dir.path(), ENV, &mallory, &[("API_KEY", "attacker")]);
 
     for args in [
         vec!["get", "API_KEY"],
@@ -131,7 +106,12 @@ fn a_write_path_refuses_a_forged_vault() {
     // - otherwise the next write launders the attacker's values into a signed vault.
     let f = init_git_project();
     let mallory = Identity::generate().unwrap();
-    forge_vault(f.dir.path(), &mallory, &[("LD_PRELOAD", "/tmp/evil.so")]);
+    forge_vault(
+        f.dir.path(),
+        ENV,
+        &mallory,
+        &[("LD_PRELOAD", "/tmp/evil.so")],
+    );
 
     bf(f.dir.path(), &f.id)
         .args(["set", "K=v"])
@@ -146,7 +126,12 @@ fn status_separates_a_forged_vault_from_one_it_cannot_decrypt() {
     // this vault" would name the wrong cause and hide tampering.
     let f = init_git_project();
     let mallory = Identity::generate().unwrap();
-    forge_vault(f.dir.path(), &mallory, &[("LD_PRELOAD", "/tmp/evil.so")]);
+    forge_vault(
+        f.dir.path(),
+        ENV,
+        &mallory,
+        &[("LD_PRELOAD", "/tmp/evil.so")],
+    );
 
     bf(f.dir.path(), &f.id)
         .arg("status")
@@ -256,7 +241,7 @@ fn verify_passes_on_a_healthy_vault_and_fails_on_a_forged_one() {
         .stdout(predicate::str::contains("signed by"));
 
     let mallory = Identity::generate().unwrap();
-    forge_vault(f.dir.path(), &mallory, &[("API_KEY", "attacker")]);
+    forge_vault(f.dir.path(), ENV, &mallory, &[("API_KEY", "attacker")]);
     bf(f.dir.path(), &f.id)
         .arg("verify")
         .assert()

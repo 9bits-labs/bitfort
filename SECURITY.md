@@ -7,8 +7,9 @@ disclosure policy applies.
 
 ## Report a vulnerability
 
-Write to [security@bitfort.dev](mailto:security@bitfort.dev). Do not open a public issue, pull
-request or discussion for a vulnerability.
+Write to [security@bitfort.dev](mailto:security@bitfort.dev), or use GitHub's private reporting
+on this repository: [report a vulnerability](https://github.com/9bits-labs/bitfort/security/advisories/new).
+Do not open a public issue, pull request or discussion for a vulnerability.
 
 Include:
 

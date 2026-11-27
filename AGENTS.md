@@ -46,7 +46,7 @@ binary, not just unit tests:
 
 ```sh
 cargo build --workspace
-./target/debug/bitfort --version        # -> "bitfort 0.1.0"
+./target/debug/bitfort --version        # -> "bitfort 0.1.0-rc.1"
 # then drive the command you changed, e.g. ./target/debug/bitfort run -- printenv SOME_KEY
 ./scripts/check-heap-wipe.sh            # macOS only: no secret left in freed heap memory
 ```

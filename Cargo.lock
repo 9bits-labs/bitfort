@@ -365,7 +365,7 @@ checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 
 [[package]]
 name = "bitfort"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "anstream",
  "anstyle",
@@ -386,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "bitfort-core"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "age",
  "base64 0.22.1",
